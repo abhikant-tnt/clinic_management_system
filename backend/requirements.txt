@@ -1,0 +1,6 @@
+pymongo
+pydantic
+fastapi
+uvicorn[standard]
+requests
+fastapi[standard]
