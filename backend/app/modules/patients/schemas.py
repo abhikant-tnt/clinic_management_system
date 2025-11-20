@@ -7,4 +7,4 @@ class Patient(BaseModel):
     registration_date: str
     billed_amount: float
     outstanding_amount: float
-    
+
