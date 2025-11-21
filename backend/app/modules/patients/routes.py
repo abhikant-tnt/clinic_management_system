@@ -1,32 +1,22 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from app.modules.patients.schemas import Patient
 from app.core.database import collection, sqlite_conn, sqlite_cursor
-from bson import ObjectId
 
 router = APIRouter()
 
 def clean_mongo_document(doc):
-    """Remove ObjectId and other non-serializable types from MongoDB document"""
-    if doc is None:
-        return None
-    if isinstance(doc, dict):
-        cleaned = {}
-        for key, value in doc.items():
-            if key == "_id" and isinstance(value, ObjectId):
-                continue  # Skip _id field
-            elif isinstance(value, ObjectId):
-                cleaned[key] = str(value)
-            elif isinstance(value, dict):
-                cleaned[key] = clean_mongo_document(value)
-            elif isinstance(value, list):
-                cleaned[key] = [clean_mongo_document(item) for item in value]
-            else:
-                cleaned[key] = value
-        return cleaned
+    """Remove _id field from MongoDB document (safety net for projection)"""
+    if doc and isinstance(doc, dict):
+        doc.pop("_id", None)  # Remove _id if it exists (shouldn't with projection, but safety net)
     return doc
 
 @router.get("/")
-def get_patients():
+def get_patients(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100)):
+    """
+    Get all patients with pagination.
+    - page: Page number (starts from 1)
+    - limit: Number of records per page (max 100, default 10)
+    """
     # Fetching MongoDB Data
     mongo_patients = []
     mongo_ids = set()  # Track which IDs exist in MongoDB
@@ -39,10 +29,10 @@ def get_patients():
         print(f"Error fetching data from MongoDB: {e}. Skipping MongoDB.")
 
     # Fetching sqlite3 data
-    sqlite_cursor.execute("SELECT id,name, age, phone, registration_date, billed_amount, outstanding_amount FROM patients")
+    sqlite_cursor.execute("SELECT id,name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount FROM patients")
     sqlite_records = sqlite_cursor.fetchall()
     sqlite_patients = []
-    columns = ["id", "name", "age", "phone", "registration_date", "billed_amount", "outstanding_amount"]
+    columns = ["id", "name", "age", "phone", "email", "date_of_birth", "address", "registration_date", "billed_amount", "outstanding_amount"]
     for record in sqlite_records:
         patient_dict = dict(zip(columns, record))
         sqlite_patients.append(patient_dict)
@@ -70,16 +60,140 @@ def get_patients():
         if patient_id and patient_id not in all_patients:
             all_patients[patient_id] = patient
     
-    return {"patients": list(all_patients.values())} # Return unique patients 
+    # Convert to list and sort by ID for consistent pagination
+    all_patients_list = list(all_patients.values())
+    all_patients_list.sort(key=lambda x: x.get("id", 0))
+    
+    # Calculate pagination
+    total = len(all_patients_list)
+    total_pages = (total + limit - 1) // limit if total > 0 else 1  # Ceiling division
+    skip = (page - 1) * limit
+    
+    # Get paginated results
+    paginated_patients = all_patients_list[skip:skip + limit]
+    
+    return {
+        "patients": paginated_patients,
+        "pagination": {
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1
+        }
+    } 
+
+@router.get("/search")
+def search_patients(q: str, page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100)):
+    """
+    Search patients by name, id, phone, or email with pagination.
+    Supports partial matches for text fields.
+    - q: Search query (required)
+    - page: Page number (starts from 1, default 1)
+    - limit: Number of records per page (max 100, default 10)
+    """
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="Search query cannot be empty")
+    
+    search_term = q.strip()
+    results = []
+    found_ids = set()
+    
+    # Check if search term is numeric (for ID search)
+    is_numeric = search_term.isdigit()
+    search_id = int(search_term) if is_numeric else None
+    
+    # 1. --- SQLite Search ---
+    try:
+        if is_numeric:
+            # Search by ID (exact match)
+            sqlite_cursor.execute("""
+                SELECT id, name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount 
+                FROM patients 
+                WHERE id = ?
+            """, (search_id,))
+        else:
+            # Search by name, phone, or email (partial match)
+            sqlite_cursor.execute("""
+                SELECT id, name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount 
+                FROM patients 
+                WHERE name LIKE ? OR phone LIKE ? OR email LIKE ?
+            """, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+        
+        sqlite_records = sqlite_cursor.fetchall()
+        columns = ["id", "name", "age", "phone", "email", "date_of_birth", "address", "registration_date", "billed_amount", "outstanding_amount"]
+        
+        for record in sqlite_records:
+            patient_dict = dict(zip(columns, record))
+            patient_id = patient_dict.get("id")
+            if patient_id and patient_id not in found_ids:
+                results.append(patient_dict)
+                found_ids.add(patient_id)
+    except Exception as e:
+        print(f"Error searching SQLite: {e}")
+    
+    # 2. --- MongoDB Search ---
+    try:
+        if is_numeric:
+            # Search by ID (exact match)
+            mongo_query = {"id": search_id}
+        else:
+            # Search by name, phone, or email (case-insensitive partial match)
+            mongo_query = {
+                "$or": [
+                    {"name": {"$regex": search_term, "$options": "i"}},
+                    {"phone": {"$regex": search_term, "$options": "i"}},
+                    {"email": {"$regex": search_term, "$options": "i"}}
+                ]
+            }
+        
+        mongo_patients = list(collection.find(mongo_query, projection={"_id": 0}))
+        
+        for patient in mongo_patients:
+            patient = clean_mongo_document(patient)
+            patient_id = patient.get("id")
+            if patient_id and patient_id not in found_ids:
+                results.append(patient)
+                found_ids.add(patient_id)
+    except Exception as e:
+        print(f"Error searching MongoDB: {e}")
+    
+    if not results:
+        raise HTTPException(status_code=404, detail=f"No patients found matching '{search_term}'")
+    
+    # Sort results by ID for consistent pagination
+    results.sort(key=lambda x: x.get("id", 0))
+    
+    # Calculate pagination
+    total = len(results)
+    total_pages = (total + limit - 1) // limit if total > 0 else 1  # Ceiling division
+    skip = (page - 1) * limit
+    
+    # Get paginated results
+    paginated_results = results[skip:skip + limit]
+    
+    return {
+        "query": search_term,
+        "patients": paginated_results,
+        "pagination": {
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1
+        }
+    }
 
 @router.get("/{patient_id}")
 def get_patient(patient_id: int):
     # 1. --- SQLite Search ---
-    sqlite_cursor.execute("SELECT id, name, age, phone, registration_date, billed_amount, outstanding_amount FROM patients WHERE id = ?", (patient_id,))
+    sqlite_cursor.execute("SELECT id, name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount FROM patients WHERE id = ?", (patient_id,))
     sqlite_patient = sqlite_cursor.fetchone()
     
     if sqlite_patient:
-        columns = ["id", "name", "age", "phone", "registration_date", "billed_amount", "outstanding_amount"]
+        columns = ["id", "name", "age", "phone", "email", "date_of_birth", "address", "registration_date", "billed_amount", "outstanding_amount"]
         patient_dict = dict(zip(columns, sqlite_patient))
         
         # Check if patient exists in MongoDB, if not, sync it
@@ -132,9 +246,9 @@ def create_patient(patient: Patient):
     # Attempt SQLite save (This must happen first to generate the ID)
     try:
         sqlite_cursor.execute("""
-            INSERT INTO patients (name, age, phone, registration_date, billed_amount, outstanding_amount)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (patient.name, patient.age, patient.phone, patient.registration_date, patient.billed_amount, patient.outstanding_amount))
+            INSERT INTO patients (name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (patient.name, patient.age, patient.phone, patient.email, patient.date_of_birth, patient.address, patient.registration_date, patient.billed_amount, patient.outstanding_amount))
         sqlite_conn.commit()
         new_patient_id = sqlite_cursor.lastrowid # Get the ID that SQLite just generated (this is the unified key)
         print(f"Patient successfully saved to SQLite with ID {new_patient_id}.")
@@ -189,29 +303,28 @@ def update_patient(patient_id: int, patient: Patient): # Now expects a simple IN
     try:
         sqlite_cursor.execute("""
             UPDATE patients
-            SET name=?, age=?, phone=?, registration_date=?, billed_amount=?, outstanding_amount=?
+            SET name=?, age=?, phone=?, email=?, date_of_birth=?, address=?, registration_date=?, billed_amount=?, outstanding_amount=?
             WHERE id=?
-        """, (patient.name, patient.age, patient.phone, patient.registration_date, 
+        """, (patient.name, patient.age, patient.phone, patient.email, patient.date_of_birth, patient.address, patient.registration_date, 
               patient.billed_amount, patient.outstanding_amount, patient_id)) # Search by 'id'
         sqlite_conn.commit()
         if sqlite_cursor.rowcount == 1:
-             print(f"SQLite patient ID {patient_id} updated.")
-             sqlite_updated = True
-             
-             # If SQLite update succeeded but MongoDB doesn't have the record, sync it
-             if not mongo_updated:
-                 try:
-                     # Get the updated patient data from SQLite
-                     sqlite_cursor.execute("SELECT id, name, age, phone, registration_date, billed_amount, outstanding_amount FROM patients WHERE id = ?", (patient_id,))
-                     updated_patient = sqlite_cursor.fetchone()
-                     if updated_patient:
-                         columns = ["id", "name", "age", "phone", "registration_date", "billed_amount", "outstanding_amount"]
-                         patient_dict = dict(zip(columns, updated_patient))
-                         collection.insert_one(patient_dict)
-                         print(f"Patient ID {patient_id} synced from SQLite to MongoDB after update.")
-                         mongo_updated = True
-                 except Exception as e:
-                     print(f"Failed to sync patient ID {patient_id} to MongoDB after update: {e}")
+            print(f"SQLite patient ID {patient_id} updated.")
+            sqlite_updated = True 
+            # If SQLite update succeeded but MongoDB doesn't have the record, sync it
+            if not mongo_updated:
+                try:
+                    # Get the updated patient data from SQLite
+                    sqlite_cursor.execute("SELECT id, name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount FROM patients WHERE id = ?", (patient_id,))
+                    updated_patient = sqlite_cursor.fetchone()
+                    if updated_patient:
+                        columns = ["id", "name", "age", "phone", "email", "date_of_birth", "address", "registration_date", "billed_amount", "outstanding_amount"]
+                        patient_dict = dict(zip(columns, updated_patient))
+                        collection.insert_one(patient_dict)
+                        print(f"Patient ID {patient_id} synced from SQLite to MongoDB after update.")
+                        mongo_updated = True
+                except Exception as e:
+                    print(f"Failed to sync patient ID {patient_id} to MongoDB after update: {e}")
     except Exception as e:
         print(f"SQLite Update FAILED. Error: {str(e)}.")
         
@@ -233,7 +346,7 @@ def delete_patient(patient_id: int):
             print(f"Patient ID {patient_id} successfully deleted from MongoDB.")
             mongo_deleted = True
         else:
-             print(f"Patient ID {patient_id} not found in MongoDB for deletion.")
+            print(f"Patient ID {patient_id} not found in MongoDB for deletion.")
     except Exception as e:
         print(f"Error deleting patient from MongoDB: {e}.")
 
