@@ -1,0 +1,25 @@
+// Prisma Schema for Clinic Management System
+generator client {
+  provider = "prisma-client-python"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Patient {
+  id                Int      @id @default(autoincrement())
+  name              String   @db.VarChar(255)
+  age               Int?
+  phone             String   @unique @db.VarChar(50)
+  email             String?  @db.VarChar(255)
+  date_of_birth     String?  @db.VarChar(50)
+  address           String?  @db.Text
+  registration_date String   @db.VarChar(50)
+  billed_amount     Decimal  @db.Decimal(10, 2)
+  outstanding_amount Decimal @db.Decimal(10, 2)
+
+  @@map("patients")
+}
+

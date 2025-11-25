@@ -3,8 +3,10 @@ from app.core.database import (
     client,
     conn,
     collection,
-    sqlite_conn,
-    sqlite_cursor
+    mongo_connected,
+    postgres_conn,
+    postgres_cursor,
+    prisma_client
 )
 
 __all__ = [
@@ -12,8 +14,10 @@ __all__ = [
     "client",
     "conn",
     "collection",
-    "sqlite_conn",
-    "sqlite_cursor"
+    "mongo_connected",
+    "postgres_conn",
+    "postgres_cursor",
+    "prisma_client"
 ]
 
 

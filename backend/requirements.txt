@@ -4,3 +4,7 @@ fastapi
 uvicorn[standard]
 requests
 fastapi[standard]
+psycopg2-binary
+python-dotenv
+strawberry-graphql
+prisma
