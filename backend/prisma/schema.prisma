@@ -10,16 +10,26 @@ datasource db {
 
 model Patient {
   id                Int      @id @default(autoincrement())
+  tenant_id         String   @db.VarChar(100)
   name              String   @db.VarChar(255)
   age               Int?
-  phone             String   @unique @db.VarChar(50)
+  gender            String   @db.VarChar(10)  // male, female, or other
+  phone             String   @db.VarChar(50)
   email             String?  @db.VarChar(255)
   date_of_birth     String?  @db.VarChar(50)
   address           String?  @db.Text
   registration_date String   @db.VarChar(50)
+  referral_source   String   @db.VarChar(20)  // doctor, self, friend, online
+  referral_subcategory String? @db.VarChar(255)  // Optional subcategory
+  patient_status    String   @db.VarChar(30)  // Active, Inactive, VIP, Do not treat, Requires follow up
+  important_notes   String?  @db.Text  // Optional notes - local only, not synced to main server
   billed_amount     Decimal  @db.Decimal(10, 2)
   outstanding_amount Decimal @db.Decimal(10, 2)
+  synced_to_main    Boolean  @default(false)
+  last_synced_at     DateTime?
 
+  @@unique([tenant_id, phone])
+  @@index([tenant_id])
   @@map("patients")
 }
 

@@ -1,22 +1,29 @@
 """
 GraphQL schema for Patient module using Strawberry
 """
+import re
 import strawberry
 from typing import Optional, List
-from datetime import datetime
+
 
 
 @strawberry.type
 class PatientType:
     """GraphQL Patient type"""
     id: Optional[int] = None
+    tenant_id: Optional[str] = None
     name: str
     age: int
+    gender: str
     phone: str
     email: Optional[str] = None
     date_of_birth: Optional[str] = None
     address: Optional[str] = None
     registration_date: str
+    referral_source: str
+    referral_subcategory: Optional[str] = None
+    patient_status: str
+    important_notes: Optional[str] = None
     billed_amount: float
     outstanding_amount: float
 
@@ -26,11 +33,16 @@ class PatientInput:
     """GraphQL Patient input for creating/updating"""
     name: str
     age: int
+    gender: str
     phone: str
     email: Optional[str] = None
     date_of_birth: Optional[str] = None
     address: Optional[str] = None
     registration_date: str
+    referral_source: str
+    referral_subcategory: Optional[str] = None
+    patient_status: str
+    important_notes: Optional[str] = None
     billed_amount: float
     outstanding_amount: float
 
@@ -55,16 +67,15 @@ class PatientsResponse:
 
 @strawberry.type
 class Query:
-    """GraphQL Query type"""
-    
+    """GraphQL Query type""" 
     @strawberry.field
-    def patient(self, id: int) -> Optional[PatientType]:
+    def patient(self, patient_id: int) -> Optional[PatientType]:
         """Get a single patient by ID"""
         from app.modules.patients.routes import get_patient
         from fastapi import HTTPException
         
         try:
-            result = get_patient(id)
+            result = get_patient(patient_id)
             if "patient" in result:
                 patient_data = result["patient"]
                 return PatientType(**patient_data)
@@ -111,7 +122,7 @@ class Query:
                 patients=patients_list,
                 pagination=pagination
             )
-        except HTTPException as e:
+        except HTTPException:
             # Return empty result if not found
             return PatientsResponse(
                 patients=[],
@@ -133,48 +144,51 @@ class Mutation:
     @strawberry.mutation
     def create_patient(self, patient: PatientInput) -> PatientType:
         """Create a new patient"""
-        from app.modules.patients.routes import create_patient
+        from app.modules.patients.routes import create_patient, get_patient
         from app.modules.patients.schemas import Patient as PatientSchema
         from fastapi import HTTPException
-        
         # Convert GraphQL input to Pydantic model
         patient_data = PatientSchema(
             name=patient.name,
             age=patient.age,
+            gender=patient.gender,
             phone=patient.phone,
             email=patient.email,
             date_of_birth=patient.date_of_birth,
             address=patient.address,
             registration_date=patient.registration_date,
+            referral_source=patient.referral_source,
+            referral_subcategory=patient.referral_subcategory,
+            patient_status=patient.patient_status,
+            important_notes=patient.important_notes,
             billed_amount=patient.billed_amount,
             outstanding_amount=patient.outstanding_amount
         )
         
         try:
-            create_patient(patient_data)
-            # Fetch the created patient to return it
-            # We'll need to get the ID from the response or fetch by phone
-            from app.modules.patients.routes import get_patients
-            all_patients = get_patients(page=1, limit=1000)
-            # Find the patient by phone (assuming phone is unique)
-            created_patient = next(
-                (p for p in all_patients["patients"] if p["phone"] == patient.phone),
-                None
-            )
-            if created_patient:
-                return PatientType(**created_patient)
-            raise Exception("Patient created but could not be retrieved")
+            result = create_patient(patient_data)
+            # Extract patient ID from the response message
+            # Format: "Patient created successfully with ID {id}."
+            message = result.get("message", "")
+            match = re.search(r"ID (\d+)", message)
+            if match:
+                patient_id = int(match.group(1))
+                # Fetch the created patient
+                patient_result = get_patient(patient_id)
+                if "patient" in patient_result:
+                    return PatientType(**patient_result["patient"])
+            raise ValueError("Patient created but could not retrieve ID from response")
         except HTTPException as e:
-            raise Exception(f"Failed to create patient: {e.detail}")
+            raise ValueError(f"Failed to create patient: {e.detail}") from e
     
     @strawberry.mutation
     def update_patient(
         self, 
-        id: int, 
+        patient_id: int, 
         patient: PatientInput
     ) -> Optional[PatientType]:
         """Update an existing patient"""
-        from app.modules.patients.routes import update_patient
+        from app.modules.patients.routes import update_patient, get_patient
         from app.modules.patients.schemas import Patient as PatientSchema
         from fastapi import HTTPException
         
@@ -182,34 +196,38 @@ class Mutation:
         patient_data = PatientSchema(
             name=patient.name,
             age=patient.age,
+            gender=patient.gender,
             phone=patient.phone,
             email=patient.email,
             date_of_birth=patient.date_of_birth,
             address=patient.address,
             registration_date=patient.registration_date,
+            referral_source=patient.referral_source,
+            referral_subcategory=patient.referral_subcategory,
+            patient_status=patient.patient_status,
+            important_notes=patient.important_notes,
             billed_amount=patient.billed_amount,
             outstanding_amount=patient.outstanding_amount
         )
         
         try:
-            update_patient(patient_id=id, patient=patient_data)
+            update_patient(patient_id=patient_id, patient=patient_data)
             # Fetch the updated patient
-            from app.modules.patients.routes import get_patient
-            result = get_patient(id)
+            result = get_patient(patient_id)
             if "patient" in result:
                 return PatientType(**result["patient"])
             return None
         except HTTPException as e:
-            raise Exception(f"Failed to update patient: {e.detail}")
+            raise ValueError(f"Failed to update patient: {e.detail}") from e
     
     @strawberry.mutation
-    def delete_patient(self, id: int) -> bool:
+    def delete_patient(self, patient_id: int) -> bool:
         """Delete a patient by ID"""
         from app.modules.patients.routes import delete_patient
         from fastapi import HTTPException
         
         try:
-            delete_patient(id)
+            delete_patient(patient_id)
             return True
         except HTTPException:
             return False

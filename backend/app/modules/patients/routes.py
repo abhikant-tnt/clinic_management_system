@@ -1,92 +1,84 @@
 from fastapi import APIRouter, HTTPException, Query
 from app.modules.patients.schemas import Patient
-from app.core.database import collection, mongo_connected, postgres_conn, postgres_cursor, prisma_client
+from app.core.database import (
+    local_postgres_conn, 
+    local_postgres_cursor, 
+    prisma_client,
+    sync_local_to_main
+)
+from app.core.config import settings
 from decimal import Decimal
+import psycopg2
+from psycopg2 import Error as PostgresError
 
 router = APIRouter()
 
-def clean_mongo_document(doc):
-    """Remove _id field from MongoDB document (safety net for projection)"""
-    if doc and isinstance(doc, dict):
-        doc.pop("_id", None)  # Remove _id if it exists (shouldn't with projection, but safety net)
-    return doc
+def get_tenant_id() -> str:
+    """Get tenant ID from settings"""
+    return settings.TENANT_ID
 
 @router.get("/")
 def get_patients(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100)):
     """
-    Get all patients with pagination.
+    Get all patients with pagination for the current tenant.
     - page: Page number (starts from 1)
     - limit: Number of records per page (max 100, default 10)
     """
-    # Sync PostgreSQL → MongoDB (primary sync direction)
-    # PostgreSQL is source of truth, MongoDB is backup
-    if mongo_connected and collection is not None and (prisma_client or (postgres_cursor and postgres_conn)):
-        from app.core.database import sync_postgres_to_mongo
-        sync_postgres_to_mongo()
+    tenant_id = get_tenant_id()
     
-    # Fetching MongoDB Data
-    mongo_patients = []
-    mongo_ids = set()  # Track which IDs exist in MongoDB
-    if mongo_connected and collection is not None:
-        try:
-            patients = list(collection.find({}, projection={"_id": 0})) # projection means explicitly exclude the MongoDB internal _id field
-            # Clean all documents to ensure no ObjectId remains
-            mongo_patients = [clean_mongo_document(p) for p in patients]
-            mongo_ids = {p.get("id") for p in mongo_patients if p.get("id") is not None}  # Get all MongoDB IDs
-        except Exception as e:
-            print(f"Error fetching data from MongoDB: {e}. Skipping MongoDB.")
-
-    # Fetching PostgreSQL data using Prisma (or fallback to raw SQL)
+    # Sync Local → Main Server
+    sync_local_to_main()
+    
+    # Fetching Local PostgreSQL data using Prisma (or fallback to raw SQL)
     postgres_patients = []
     if prisma_client:
         try:
-            patients = prisma_client.patient.find_many()
+            patients = prisma_client.patient.find_many(
+                where={"tenant_id": tenant_id}
+            )
             for patient in patients:
                 patient_dict = {
                     "id": patient.id,
+                    "tenant_id": patient.tenant_id,
                     "name": patient.name,
                     "age": patient.age,
+                    "gender": patient.gender,
                     "phone": patient.phone,
                     "email": patient.email,
                     "date_of_birth": patient.date_of_birth,
                     "address": patient.address,
                     "registration_date": patient.registration_date,
+                    "referral_source": patient.referral_source,
+                    "referral_subcategory": patient.referral_subcategory,
+                    "patient_status": patient.patient_status,
+                    "important_notes": patient.important_notes,
                     "billed_amount": float(patient.billed_amount) if patient.billed_amount else 0.0,
                     "outstanding_amount": float(patient.outstanding_amount) if patient.outstanding_amount else 0.0
                 }
                 postgres_patients.append(patient_dict)
-        except Exception as e:
+        except (AttributeError, RuntimeError, ValueError) as e:
             print(f"Error fetching data from PostgreSQL (Prisma): {e}. Skipping PostgreSQL.")
-    elif postgres_cursor:
+    elif local_postgres_cursor:
         try:
-            postgres_cursor.execute("SELECT id,name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount FROM patients")
-            postgres_records = postgres_cursor.fetchall()
-            columns = ["id", "name", "age", "phone", "email", "date_of_birth", "address", "registration_date", "billed_amount", "outstanding_amount"]
+            local_postgres_cursor.execute("""
+                SELECT id, tenant_id, name, age, gender, phone, email, date_of_birth, address, 
+                    registration_date, referral_source, referral_subcategory, patient_status, 
+                    important_notes, billed_amount, outstanding_amount 
+                FROM patients 
+                WHERE tenant_id = %s
+            """, (tenant_id,))
+            postgres_records = local_postgres_cursor.fetchall()
+            columns = ["id", "tenant_id", "name", "age", "gender", "phone", "email", "date_of_birth", 
+                    "address", "registration_date", "referral_source", "referral_subcategory", 
+                    "patient_status", "important_notes", "billed_amount", "outstanding_amount"]
             for record in postgres_records:
                 patient_dict = dict(zip(columns, record))
                 postgres_patients.append(patient_dict)
-        except Exception as e:
+        except (PostgresError, psycopg2.OperationalError) as e:
             print(f"Error fetching data from PostgreSQL: {e}. Skipping PostgreSQL.")
     
-    # PostgreSQL is source of truth - use PostgreSQL data primarily
-    # MongoDB is only used as fallback if PostgreSQL is unavailable
-    all_patients = {}
-    
-    # Primary: Use PostgreSQL data (source of truth)
-    if postgres_patients:
-        for patient in postgres_patients:
-            patient_id = patient.get("id")
-            if patient_id:
-                all_patients[patient_id] = patient
-    # Fallback: Use MongoDB only if PostgreSQL is unavailable
-    elif mongo_patients:
-        for patient in mongo_patients:
-            patient_id = patient.get("id")
-            if patient_id:
-                all_patients[patient_id] = patient
-    
     # Convert to list and sort by ID for consistent pagination
-    all_patients_list = list(all_patients.values())
+    all_patients_list = postgres_patients
     all_patients_list.sort(key=lambda x: x.get("id", 0))
     
     # Calculate pagination
@@ -112,7 +104,7 @@ def get_patients(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100
 @router.get("/search")
 def search_patients(q: str, page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100)):
     """
-    Search patients by name, id, phone, or email with pagination.
+    Search patients by name, id, phone, or email with pagination for the current tenant.
     Supports partial matches for text fields.
     - q: Search query (required)
     - page: Page number (starts from 1, default 1)
@@ -121,6 +113,7 @@ def search_patients(q: str, page: int = Query(1, ge=1), limit: int = Query(10, g
     if not q or not q.strip():
         raise HTTPException(status_code=400, detail="Search query cannot be empty")
     
+    tenant_id = get_tenant_id()
     search_term = q.strip()
     results = []
     found_ids = set()
@@ -129,17 +122,21 @@ def search_patients(q: str, page: int = Query(1, ge=1), limit: int = Query(10, g
     is_numeric = search_term.isdigit()
     search_id = int(search_term) if is_numeric else None
     
-    # 1. --- PostgreSQL Search (using Prisma or fallback to raw SQL) ---
+    # PostgreSQL Search (using Prisma or fallback to raw SQL)
     if prisma_client:
         try:
             if is_numeric:
                 # Search by ID (exact match)
-                patient = prisma_client.patient.find_unique(where={"id": search_id})
+                patient = prisma_client.patient.find_first(
+                    where={"id": search_id, "tenant_id": tenant_id}
+                )
                 if patient:
                     patient_dict = {
                         "id": patient.id,
+                        "tenant_id": patient.tenant_id,
                         "name": patient.name,
                         "age": patient.age,
+                        "gender": patient.gender,
                         "phone": patient.phone,
                         "email": patient.email,
                         "date_of_birth": patient.date_of_birth,
@@ -152,21 +149,24 @@ def search_patients(q: str, page: int = Query(1, ge=1), limit: int = Query(10, g
                     found_ids.add(patient.id)
             else:
                 # Search by name, phone, or email (partial match)
-                # Note: Prisma Python doesn't support case-insensitive search directly, so we'll fetch all and filter
-                patients = prisma_client.patient.find_many()
+                patients = prisma_client.patient.find_many(
+                    where={"tenant_id": tenant_id}
+                )
                 # Filter in Python for case-insensitive partial match
                 search_term_lower = search_term.lower()
                 patients = [
                     p for p in patients
                     if (p.name and search_term_lower in p.name.lower()) or
-                       (p.phone and search_term_lower in p.phone.lower()) or
-                       (p.email and search_term_lower in (p.email.lower() if p.email else ""))
+                    (p.phone and search_term_lower in p.phone.lower()) or
+                    (p.email and search_term_lower in (p.email.lower() if p.email else ""))
                 ]
                 for patient in patients:
                     patient_dict = {
                         "id": patient.id,
+                        "tenant_id": patient.tenant_id,
                         "name": patient.name,
                         "age": patient.age,
+                        "gender": patient.gender,
                         "phone": patient.phone,
                         "email": patient.email,
                         "date_of_birth": patient.date_of_birth,
@@ -178,27 +178,33 @@ def search_patients(q: str, page: int = Query(1, ge=1), limit: int = Query(10, g
                     if patient.id not in found_ids:
                         results.append(patient_dict)
                         found_ids.add(patient.id)
-        except Exception as e:
+        except (AttributeError, RuntimeError, ValueError) as e:
             print(f"Error searching PostgreSQL (Prisma): {e}")
-    elif postgres_cursor:
+    elif local_postgres_cursor:
         try:
             if is_numeric:
                 # Search by ID (exact match)
-                postgres_cursor.execute("""
-                    SELECT id, name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount 
+                local_postgres_cursor.execute("""
+                    SELECT id, tenant_id, name, age, gender, phone, email, date_of_birth, address, 
+                        registration_date, referral_source, referral_subcategory, patient_status, 
+                        important_notes, billed_amount, outstanding_amount 
                     FROM patients 
-                    WHERE id = %s
-                """, (search_id,))
+                    WHERE id = %s AND tenant_id = %s
+                """, (search_id, tenant_id))
             else:
                 # Search by name, phone, or email (partial match)
-                postgres_cursor.execute("""
-                    SELECT id, name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount 
+                local_postgres_cursor.execute("""
+                    SELECT id, tenant_id, name, age, gender, phone, email, date_of_birth, address, 
+                        registration_date, referral_source, referral_subcategory, patient_status, 
+                        important_notes, billed_amount, outstanding_amount 
                     FROM patients 
-                    WHERE name LIKE %s OR phone LIKE %s OR email LIKE %s
-                """, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+                    WHERE tenant_id = %s AND (name LIKE %s OR phone LIKE %s OR email LIKE %s)
+                """, (tenant_id, f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
             
-            postgres_records = postgres_cursor.fetchall()
-            columns = ["id", "name", "age", "phone", "email", "date_of_birth", "address", "registration_date", "billed_amount", "outstanding_amount"]
+            postgres_records = local_postgres_cursor.fetchall()
+            columns = ["id", "tenant_id", "name", "age", "gender", "phone", "email", "date_of_birth", 
+                    "address", "registration_date", "referral_source", "referral_subcategory", 
+                    "patient_status", "important_notes", "billed_amount", "outstanding_amount"]
             
             for record in postgres_records:
                 patient_dict = dict(zip(columns, record))
@@ -206,35 +212,8 @@ def search_patients(q: str, page: int = Query(1, ge=1), limit: int = Query(10, g
                 if patient_id and patient_id not in found_ids:
                     results.append(patient_dict)
                     found_ids.add(patient_id)
-        except Exception as e:
+        except (PostgresError, psycopg2.OperationalError) as e:
             print(f"Error searching PostgreSQL: {e}")
-    
-    # 2. --- MongoDB Search ---
-    if mongo_connected and collection is not None:
-        try:
-            if is_numeric:
-                # Search by ID (exact match)
-                mongo_query = {"id": search_id}
-            else:
-                # Search by name, phone, or email (case-insensitive partial match)
-                mongo_query = {
-                    "$or": [
-                        {"name": {"$regex": search_term, "$options": "i"}},
-                        {"phone": {"$regex": search_term, "$options": "i"}},
-                        {"email": {"$regex": search_term, "$options": "i"}}
-                    ]
-                }
-            
-            mongo_patients = list(collection.find(mongo_query, projection={"_id": 0}))
-            
-            for patient in mongo_patients:
-                patient = clean_mongo_document(patient)
-                patient_id = patient.get("id")
-                if patient_id and patient_id not in found_ids:
-                    results.append(patient)
-                    found_ids.add(patient_id)
-        except Exception as e:
-            print(f"Error searching MongoDB: {e}")
     
     if not results:
         raise HTTPException(status_code=404, detail=f"No patients found matching '{search_term}'")
@@ -265,351 +244,279 @@ def search_patients(q: str, page: int = Query(1, ge=1), limit: int = Query(10, g
 
 @router.get("/{patient_id}")
 def get_patient(patient_id: int):
-    # 1. --- PostgreSQL Search (using Prisma or fallback to raw SQL) ---
-    postgres_patient = None
+    """Get a single patient by ID for the current tenant"""
+    tenant_id = get_tenant_id()
+    
     patient_dict = None
     
     if prisma_client:
         try:
-            patient = prisma_client.patient.find_unique(where={"id": patient_id})
+            patient = prisma_client.patient.find_first(
+                where={"id": patient_id, "tenant_id": tenant_id}
+            )
             if patient:
                 patient_dict = {
                     "id": patient.id,
+                    "tenant_id": patient.tenant_id,
                     "name": patient.name,
                     "age": patient.age,
+                    "gender": patient.gender,
                     "phone": patient.phone,
                     "email": patient.email,
                     "date_of_birth": patient.date_of_birth,
                     "address": patient.address,
                     "registration_date": patient.registration_date,
+                    "referral_source": patient.referral_source,
+                    "referral_subcategory": patient.referral_subcategory,
+                    "patient_status": patient.patient_status,
+                    "important_notes": patient.important_notes,
                     "billed_amount": float(patient.billed_amount) if patient.billed_amount else 0.0,
                     "outstanding_amount": float(patient.outstanding_amount) if patient.outstanding_amount else 0.0
                 }
-        except Exception as e:
+        except (AttributeError, RuntimeError, ValueError) as e:
             print(f"Error fetching patient from PostgreSQL (Prisma): {e}")
-    elif postgres_cursor:
+    elif local_postgres_cursor:
         try:
-            postgres_cursor.execute("SELECT id, name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount FROM patients WHERE id = %s", (patient_id,))
-            postgres_patient = postgres_cursor.fetchone()
+            local_postgres_cursor.execute("""
+                SELECT id, tenant_id, name, age, gender, phone, email, date_of_birth, address, 
+                    registration_date, referral_source, referral_subcategory, patient_status, 
+                    important_notes, billed_amount, outstanding_amount 
+                FROM patients 
+                WHERE id = %s AND tenant_id = %s
+            """, (patient_id, tenant_id))
+            postgres_patient = local_postgres_cursor.fetchone()
             if postgres_patient:
-                columns = ["id", "name", "age", "phone", "email", "date_of_birth", "address", "registration_date", "billed_amount", "outstanding_amount"]
+                columns = ["id", "tenant_id", "name", "age", "gender", "phone", "email", "date_of_birth", 
+                        "address", "registration_date", "referral_source", "referral_subcategory", 
+                        "patient_status", "important_notes", "billed_amount", "outstanding_amount"]
                 patient_dict = dict(zip(columns, postgres_patient))
-        except Exception as e:
+        except (PostgresError, psycopg2.OperationalError) as e:
             print(f"Error fetching patient from PostgreSQL: {e}")
     
     if patient_dict:
-        # Check if patient exists in MongoDB, if not, sync it
-        if mongo_connected and collection is not None:
-            try:
-                mongo_patient = collection.find_one({"id": patient_id}, projection={"_id": 0})
-                if not mongo_patient:
-                    # Patient exists in PostgreSQL but not in MongoDB - sync it
-                    try:
-                        collection.insert_one(patient_dict)
-                        print(f"Patient ID {patient_id} synced from PostgreSQL to MongoDB.")
-                    except Exception as e:
-                        print(f"Failed to sync patient ID {patient_id} to MongoDB: {e}")
-            except Exception as e:
-                print(f"Error checking MongoDB for patient ID {patient_id}: {e}")
-        
-        return {"database": "PostgreSQL", "patient": patient_dict}
-
-    # 2. --- MongoDB Search ---
-    if mongo_connected and collection is not None:
-        try:
-            mongo_patient = collection.find_one({"id": patient_id}, projection={"_id": 0}) # Search MongoDB using  custom 'id' integer field, and exclude _id
-            if mongo_patient:
-                mongo_patient = clean_mongo_document(mongo_patient)  # Clean ObjectId
-                return {"database": "MongoDB", "patient": mongo_patient}
-        except Exception as e:
-            print(f"Error searching MongoDB: {e}")
-    raise HTTPException(status_code=404, detail=f"Patient with ID {patient_id} not found in any database.")
+        return {"database": "Local PostgreSQL", "patient": patient_dict}
+    
+    raise HTTPException(status_code=404, detail=f"Patient with ID {patient_id} not found.")
 
 @router.post("/")
 def create_patient(patient: Patient):
-    # Initial Validation (Always run first)
+    """Create a new patient for the current tenant"""
+    tenant_id = get_tenant_id()
+    
+    # Initial Validation
     if not patient.name or not patient.phone:
         raise HTTPException(status_code=400, detail="Name and phone cannot be empty")
     if patient.age <= 0:
         raise HTTPException(status_code=400, detail="Age must be greater than 0")
     if patient.billed_amount < 0 or patient.outstanding_amount < 0:
         raise HTTPException(status_code=400, detail="Amounts cannot be negative")
+    # Gender validation is automatically handled by Pydantic Literal type
 
-    # Check for existing phone number in both databases
-    mongo_existing = None
-    if mongo_connected and collection is not None:
-        try:
-            mongo_existing = collection.find_one({"phone": patient.phone}, projection={"_id": 0})
-        except Exception as e:
-            print(f"Error checking phone in MongoDB: {e}")
-    
+    # Check for existing phone number in local database
     postgres_existing = None
     if prisma_client:
         try:
-            postgres_existing = prisma_client.patient.find_first(where={"phone": patient.phone})
-        except Exception as e:
+            postgres_existing = prisma_client.patient.find_first(
+                where={"phone": patient.phone, "tenant_id": tenant_id}
+            )
+        except (AttributeError, RuntimeError, ValueError) as e:
             print(f"Error checking phone in PostgreSQL (Prisma): {e}")
-    elif postgres_cursor:
+    elif local_postgres_cursor:
         try:
-            postgres_cursor.execute("SELECT id FROM patients WHERE phone = %s", (patient.phone,))
-            postgres_existing = postgres_cursor.fetchone()
-        except Exception as e:
+            local_postgres_cursor.execute(
+                "SELECT id FROM patients WHERE phone = %s AND tenant_id = %s", 
+                (patient.phone, tenant_id)
+            )
+            postgres_existing = local_postgres_cursor.fetchone()
+        except (PostgresError, psycopg2.OperationalError) as e:
             print(f"Error checking phone in PostgreSQL: {e}")
     
-    if mongo_existing or postgres_existing:
-        raise HTTPException(status_code=400, detail="Patient with this phone number already exists (in MongoDB or PostgreSQL).")
+    if postgres_existing:
+        raise HTTPException(
+            status_code=400, 
+            detail="Patient with this phone number already exists for this tenant."
+        )
     
-    patient_data = patient.model_dump()
-    patient_data.pop('id', None)  # Remove any existing id (will be set from database)
+    # Set tenant_id if not provided
+    if not patient.tenant_id:
+        patient.tenant_id = tenant_id
+    
     save_successful = False
     new_patient_id = None
     
-    # Attempt PostgreSQL save first (preferred - generates ID automatically)
+    # Save to Local PostgreSQL
     if prisma_client:
         try:
             new_patient = prisma_client.patient.create(
                 data={
+                    "tenant_id": patient.tenant_id,
                     "name": patient.name,
                     "age": patient.age,
+                    "gender": patient.gender,
                     "phone": patient.phone,
                     "email": patient.email,
                     "date_of_birth": patient.date_of_birth,
                     "address": patient.address,
                     "registration_date": patient.registration_date,
+                    "referral_source": patient.referral_source,
+                    "referral_subcategory": patient.referral_subcategory,
+                    "patient_status": patient.patient_status,
+                    "important_notes": patient.important_notes,
                     "billed_amount": Decimal(str(patient.billed_amount)),
-                    "outstanding_amount": Decimal(str(patient.outstanding_amount))
+                    "outstanding_amount": Decimal(str(patient.outstanding_amount)),
+                    "synced_to_main": False
                 }
             )
             new_patient_id = new_patient.id
-            print(f"Patient successfully saved to PostgreSQL with ID {new_patient_id} (Prisma).")
+            print(f"Patient successfully saved to Local PostgreSQL with ID {new_patient_id} (Prisma).")
             save_successful = True
-        except Exception as e:
-            print(f"PostgreSQL save FAILED (Prisma). Error: {str(e)}.")
-    elif postgres_cursor and postgres_conn:
+        except (AttributeError, RuntimeError, ValueError, psycopg2.IntegrityError) as e:
+            print(f"Local PostgreSQL save FAILED (Prisma). Error: {str(e)}.")
+    elif local_postgres_cursor and local_postgres_conn:
         try:
-            # Use RETURNING clause to get the generated ID
-            postgres_cursor.execute("""
-                INSERT INTO patients (name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            local_postgres_cursor.execute("""
+                INSERT INTO patients (tenant_id, name, age, gender, phone, email, date_of_birth, address, 
+                                    registration_date, referral_source, referral_subcategory, patient_status, 
+                                    important_notes, billed_amount, outstanding_amount, synced_to_main)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
                 RETURNING id
-            """, (patient.name, patient.age, patient.phone, patient.email, patient.date_of_birth, patient.address, patient.registration_date, patient.billed_amount, patient.outstanding_amount))
-            result = postgres_cursor.fetchone()
+            """, (
+                patient.tenant_id, patient.name, patient.age, patient.gender, patient.phone, patient.email,
+                patient.date_of_birth, patient.address, patient.registration_date,
+                patient.referral_source, patient.referral_subcategory, patient.patient_status,
+                patient.important_notes, patient.billed_amount, patient.outstanding_amount
+            ))
+            result = local_postgres_cursor.fetchone()
             new_patient_id = result[0] if result else None
-            postgres_conn.commit()
-            print(f"Patient successfully saved to PostgreSQL with ID {new_patient_id}.")
+            local_postgres_conn.commit()
+            print(f"Patient successfully saved to Local PostgreSQL with ID {new_patient_id}.")
             save_successful = True
-        except Exception as e:
-            print(f"PostgreSQL save FAILED. Error: {str(e)}.")
+        except (PostgresError, psycopg2.IntegrityError, psycopg2.OperationalError) as e:
+            print(f"Local PostgreSQL save FAILED. Error: {str(e)}.")
     
-    # If PostgreSQL failed/unavailable, try MongoDB-only save
-    # Only do this if PostgreSQL is truly unavailable
-    # Note: MongoDB doesn't have auto-increment, but we'll use a simple counter
-    # In production, consider using MongoDB's ObjectId or a proper sequence collection
-    if not new_patient_id and not prisma_client and not postgres_cursor and mongo_connected and collection is not None:
-        try:
-            # For MongoDB fallback, use a simple counter approach
-            # In production, consider using a proper sequence collection or ObjectId
-            # This is a fallback only when PostgreSQL is completely unavailable
-            max_id_doc = collection.find_one(sort=[("id", -1)], projection={"id": 1, "_id": 0})
-            new_patient_id = (max_id_doc.get("id", 0) + 1) if max_id_doc and max_id_doc.get("id") else 1
-            patient_data["id"] = new_patient_id
-            collection.insert_one(patient_data)
-            print(f"Patient successfully saved to MongoDB with ID {new_patient_id} (PostgreSQL unavailable).")
-            print("⚠️  Note: MongoDB ID generation is not thread-safe. PostgreSQL is recommended.")
-            save_successful = True
-        except Exception as e:
-            print(f"MongoDB save FAILED. Error: {str(e)}.")
-    
-    # If PostgreSQL succeeded, also save to MongoDB (sync)
-    if new_patient_id and save_successful and mongo_connected and collection is not None:
-        try:
-            patient_data["id"] = new_patient_id
-            # Use upsert to avoid duplicate key errors
-            collection.update_one(
-                {"id": new_patient_id},
-                {"$set": patient_data},
-                upsert=True
-            )
-            print(f"Patient successfully synced to MongoDB with ID {new_patient_id}.")
-        except Exception as e:
-            print(f"MongoDB sync FAILED (non-critical). Error: {str(e)}.")
-    
-    # Final Response
+    # Sync to Main Server
     if save_successful and new_patient_id:
+        sync_local_to_main()
         return {"message": f"Patient created successfully with ID {new_patient_id}."}
     else:
-        raise HTTPException(status_code=503, detail="Could not save patient. Both databases are unavailable. Please check your database connections.")
-
+        raise HTTPException(
+            status_code=503, 
+            detail="Could not save patient. Local PostgreSQL is unavailable. Please check your database connections."
+        )
 
 @router.put("/{patient_id}")
-def update_patient(patient_id: int, patient: Patient): # Now expects a simple INTEGER ID
-    # Validation (for simplicity, assumed valid patient data)
+def update_patient(patient_id: int, patient: Patient):
+    """Update an existing patient for the current tenant"""
+    tenant_id = get_tenant_id()
+    
+    # Validation
     if not patient.name or not patient.phone:
         raise HTTPException(status_code=400, detail="Name and phone cannot be empty")
-    update_data = patient.model_dump(exclude_none=True)
-    update_data.pop('id', None)
     
-    # 1. --- PostgreSQL Update (PRIMARY - source of truth) using Prisma or fallback to raw SQL ---
+    # Ensure tenant_id matches
+    if not patient.tenant_id:
+        patient.tenant_id = tenant_id
+    
+    # Update in Local PostgreSQL
     postgres_updated = False
     if prisma_client:
         try:
-            updated_patient = prisma_client.patient.update(
-                where={"id": patient_id},
+            prisma_client.patient.update(
+                where={"id": patient_id, "tenant_id": tenant_id},
                 data={
                     "name": patient.name,
                     "age": patient.age,
+                    "gender": patient.gender,
                     "phone": patient.phone,
                     "email": patient.email,
                     "date_of_birth": patient.date_of_birth,
                     "address": patient.address,
                     "registration_date": patient.registration_date,
+                    "referral_source": patient.referral_source,
+                    "referral_subcategory": patient.referral_subcategory,
+                    "patient_status": patient.patient_status,
+                    "important_notes": patient.important_notes,
                     "billed_amount": Decimal(str(patient.billed_amount)),
-                    "outstanding_amount": Decimal(str(patient.outstanding_amount))
+                    "outstanding_amount": Decimal(str(patient.outstanding_amount)),
+                    "synced_to_main": False  # Mark as unsynced after update
                 }
             )
-            print(f"PostgreSQL patient ID {patient_id} updated (primary, Prisma).")
+            print(f"Local PostgreSQL patient ID {patient_id} updated (Prisma).")
             postgres_updated = True
-            
-            # Sync to MongoDB (backup)
-            if mongo_connected and collection is not None:
-                try:
-                    patient_dict = {
-                        "id": updated_patient.id,
-                        "name": updated_patient.name,
-                        "age": updated_patient.age,
-                        "phone": updated_patient.phone,
-                        "email": updated_patient.email,
-                        "date_of_birth": updated_patient.date_of_birth,
-                        "address": updated_patient.address,
-                        "registration_date": updated_patient.registration_date,
-                        "billed_amount": float(updated_patient.billed_amount) if updated_patient.billed_amount else 0.0,
-                        "outstanding_amount": float(updated_patient.outstanding_amount) if updated_patient.outstanding_amount else 0.0
-                    }
-                    # Update or insert in MongoDB
-                    collection.update_one(
-                        {"id": patient_id},
-                        {"$set": patient_dict},
-                        upsert=True
-                    )
-                    print(f"Patient ID {patient_id} synced to MongoDB (backup).")
-                except Exception as e:
-                    print(f"Failed to sync patient ID {patient_id} to MongoDB: {e}")
-        except Exception as e:
-            print(f"PostgreSQL Update FAILED (Prisma). Error: {str(e)}.")
-    elif postgres_cursor and postgres_conn:
+        except (AttributeError, RuntimeError, ValueError, psycopg2.IntegrityError) as e:
+            print(f"Local PostgreSQL Update FAILED (Prisma). Error: {str(e)}.")
+    elif local_postgres_cursor and local_postgres_conn:
         try:
-            postgres_cursor.execute("""
+            local_postgres_cursor.execute("""
                 UPDATE patients
-                SET name=%s, age=%s, phone=%s, email=%s, date_of_birth=%s, address=%s, registration_date=%s, billed_amount=%s, outstanding_amount=%s
-                WHERE id=%s
-            """, (patient.name, patient.age, patient.phone, patient.email, patient.date_of_birth, patient.address, patient.registration_date, 
-                patient.billed_amount, patient.outstanding_amount, patient_id))
-            postgres_conn.commit()
-            if postgres_cursor.rowcount == 1:
-                print(f"PostgreSQL patient ID {patient_id} updated (primary).")
+                SET name=%s, age=%s, gender=%s, phone=%s, email=%s, date_of_birth=%s, address=%s, 
+                    registration_date=%s, referral_source=%s, referral_subcategory=%s, patient_status=%s, 
+                    important_notes=%s, billed_amount=%s, outstanding_amount=%s, synced_to_main=FALSE
+                WHERE id=%s AND tenant_id=%s
+            """, (
+                patient.name, patient.age, patient.gender, patient.phone, patient.email, patient.date_of_birth,
+                patient.address, patient.registration_date, patient.referral_source, patient.referral_subcategory,
+                patient.patient_status, patient.important_notes, patient.billed_amount, patient.outstanding_amount, 
+                patient_id, tenant_id
+            ))
+            local_postgres_conn.commit()
+            if local_postgres_cursor.rowcount == 1:
+                print(f"Local PostgreSQL patient ID {patient_id} updated.")
                 postgres_updated = True
-                
-                # Sync to MongoDB (backup)
-                if mongo_connected and collection is not None:
-                    try:
-                        # Get the updated patient data from PostgreSQL
-                        postgres_cursor.execute("SELECT id, name, age, phone, email, date_of_birth, address, registration_date, billed_amount, outstanding_amount FROM patients WHERE id = %s", (patient_id,))
-                        updated_patient = postgres_cursor.fetchone()
-                        if updated_patient:
-                            columns = ["id", "name", "age", "phone", "email", "date_of_birth", "address", "registration_date", "billed_amount", "outstanding_amount"]
-                            patient_dict = dict(zip(columns, updated_patient))
-                            # Update or insert in MongoDB
-                            collection.update_one(
-                                {"id": patient_id},
-                                {"$set": patient_dict},
-                                upsert=True
-                            )
-                            print(f"Patient ID {patient_id} synced to MongoDB (backup).")
-                    except Exception as e:
-                        print(f"Failed to sync patient ID {patient_id} to MongoDB: {e}")
-        except Exception as e:
-            print(f"PostgreSQL Update FAILED. Error: {str(e)}.")
+        except (PostgresError, psycopg2.IntegrityError, psycopg2.OperationalError) as e:
+            print(f"Local PostgreSQL Update FAILED. Error: {str(e)}.")
     
-    # 2. --- MongoDB Update (FALLBACK - only if PostgreSQL unavailable) ---
-    mongo_updated = False
-    if not postgres_updated and mongo_connected and collection is not None:
-        try:
-            result = collection.update_one({"id": patient_id}, {"$set": update_data})
-            if result.matched_count == 1:
-                print(f"MongoDB patient ID {patient_id} updated (PostgreSQL unavailable).")
-                mongo_updated = True
-        except Exception as e:
-            print(f"MongoDB Update FAILED. Error: {str(e)}.")
-        
-    # Final Response
+    # Sync to Main Server
     if postgres_updated:
-        return {"message": f"Patient with ID {patient_id} updated successfully in PostgreSQL (primary)."}
-    elif mongo_updated:
-        return {"message": f"Patient with ID {patient_id} updated in MongoDB (PostgreSQL unavailable)."}
+        sync_local_to_main()
+        return {"message": f"Patient with ID {patient_id} updated successfully in Local PostgreSQL."}
     else:
-        raise HTTPException(status_code=404, detail=f"Patient with ID {patient_id} not found in any database to update.")
-
-
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Patient with ID {patient_id} not found for this tenant."
+        )
 
 @router.delete("/{patient_id}")
 def delete_patient(patient_id: int):
-    # 1. --- PostgreSQL Delete (PRIMARY - source of truth) using Prisma or fallback to raw SQL ---
+    """Delete a patient by ID for the current tenant"""
+    tenant_id = get_tenant_id()
+    
+    # Delete from Local PostgreSQL
     postgres_deleted = False
     if prisma_client:
         try:
-            deleted_patient = prisma_client.patient.delete(where={"id": patient_id})
-            print(f"Patient with ID {patient_id} successfully deleted from PostgreSQL (primary, Prisma).")
+            prisma_client.patient.delete(
+                where={"id": patient_id, "tenant_id": tenant_id}
+            )
+            print(f"Patient with ID {patient_id} successfully deleted from Local PostgreSQL (Prisma).")
             postgres_deleted = True
-            
-            # Also delete from MongoDB (backup)
-            if mongo_connected and collection is not None:
-                try:
-                    collection.delete_one({"id": patient_id})
-                    print(f"Patient ID {patient_id} also deleted from MongoDB (backup).")
-                except Exception as e:
-                    print(f"Failed to delete patient ID {patient_id} from MongoDB: {e}")
-        except Exception as e:
+        except (AttributeError, RuntimeError, ValueError) as e:
             if "Record to delete does not exist" in str(e) or "not found" in str(e).lower():
-                print(f"Patient with ID {patient_id} not found in PostgreSQL for deletion.")
+                print(f"Patient with ID {patient_id} not found in Local PostgreSQL for deletion.")
             else:
-                print(f"Error deleting patient from PostgreSQL (Prisma): {e}.")
-    elif postgres_cursor and postgres_conn:
+                print(f"Error deleting patient from Local PostgreSQL (Prisma): {e}.")
+    elif local_postgres_cursor and local_postgres_conn:
         try:
-            postgres_cursor.execute("DELETE FROM patients WHERE id = %s", (patient_id,))
-            postgres_conn.commit()
-            if postgres_cursor.rowcount == 1:
-                print(f"Patient with ID {patient_id} successfully deleted from PostgreSQL (primary).")
+            local_postgres_cursor.execute(
+                "DELETE FROM patients WHERE id = %s AND tenant_id = %s", 
+                (patient_id, tenant_id)
+            )
+            local_postgres_conn.commit()
+            if local_postgres_cursor.rowcount == 1:
+                print(f"Patient with ID {patient_id} successfully deleted from Local PostgreSQL.")
                 postgres_deleted = True
-                
-                # Also delete from MongoDB (backup)
-                if mongo_connected and collection is not None:
-                    try:
-                        collection.delete_one({"id": patient_id})
-                        print(f"Patient ID {patient_id} also deleted from MongoDB (backup).")
-                    except Exception as e:
-                        print(f"Failed to delete patient ID {patient_id} from MongoDB: {e}")
             else:
-                print(f"Patient with ID {patient_id} not found in PostgreSQL for deletion.")
-        except Exception as e:
-            print(f"Error deleting patient from PostgreSQL: {e}.")
+                print(f"Patient with ID {patient_id} not found in Local PostgreSQL for deletion.")
+        except (PostgresError, psycopg2.OperationalError) as e:
+            print(f"Error deleting patient from Local PostgreSQL: {e}.")
     
-    # 2. --- MongoDB Delete (FALLBACK - only if PostgreSQL unavailable) ---
-    mongo_deleted = False
-    if not postgres_deleted and mongo_connected and collection is not None:
-        try:
-            result = collection.delete_one({"id": patient_id})
-            if result.deleted_count == 1:
-                print(f"Patient ID {patient_id} successfully deleted from MongoDB (PostgreSQL unavailable).")
-                mongo_deleted = True
-            else:
-                print(f"Patient ID {patient_id} not found in MongoDB for deletion.")
-        except Exception as e:
-            print(f"Error deleting patient from MongoDB: {e}.")
+    # Note: We don't delete from main server immediately - it will be handled by sync
+    # or you can implement a separate endpoint for main server deletion if needed
     
-    # Final Response
     if postgres_deleted:
-        return {"message": f"Patient with ID {patient_id} deleted successfully from PostgreSQL (primary)."}
-    elif mongo_deleted:
-        return {"message": f"Patient with ID {patient_id} deleted from MongoDB (PostgreSQL unavailable)."}
+        return {"message": f"Patient with ID {patient_id} deleted successfully from Local PostgreSQL."}
     else:
-        raise HTTPException(status_code=404, detail="Patient not found in any database to delete.")
+        raise HTTPException(
+            status_code=404, 
+            detail="Patient not found for this tenant to delete."
+        )
