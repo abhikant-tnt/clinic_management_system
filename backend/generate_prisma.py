@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """
-Script to generate Prisma Client Python
-This is a workaround for the Prisma CLI generator issue
+Script to generate Prisma Client Python using the Python prisma package.
+This uses the Python package which downloads Prisma binaries automatically.
+No Node.js or npm installation required.
 """
 import subprocess
 import sys
@@ -12,65 +13,51 @@ from pathlib import Path
 backend_dir = Path(__file__).parent
 os.chdir(backend_dir)
 
-# Try using npx prisma generate with explicit schema path
 schema_path = backend_dir / "prisma" / "schema.prisma"
 
 print(f"Generating Prisma Client from {schema_path}...")
+print("Using Python prisma package (binaries will be downloaded automatically)...\n")
 
-# First, try to fetch binaries
+# Step 1: Fetch Prisma binaries (downloads from online, stores locally)
+print("Step 1: Fetching Prisma binaries...")
 try:
     result = subprocess.run(
         [sys.executable, "-m", "prisma", "py", "fetch"],
         cwd=backend_dir,
         capture_output=True,
-        text=True
+        text=True,
+        check=False
     )
     if result.returncode == 0:
         print("✓ Binaries fetched successfully")
     else:
         print(f"⚠ Warning: Binary fetch had issues: {result.stderr}")
-except Exception as e:
+        print("Continuing anyway...")
+except (OSError, subprocess.SubprocessError) as e:
     print(f"⚠ Warning: Could not fetch binaries: {e}")
+    print("Continuing anyway...")
 
-# Try using npx prisma generate
-try:
-    result = subprocess.run(
-        ["npx", "prisma", "generate", "--schema", str(schema_path)],
-        cwd=backend_dir,
-        capture_output=True,
-        text=True
-    )
-    if result.returncode == 0:
-        print("✓ Prisma Client generated successfully!")
-        print(result.stdout)
-        sys.exit(0)
-    else:
-        print(f"✗ Error: {result.stderr}")
-        # Try alternative method
-        print("\nTrying alternative method...")
-except Exception as e:
-    print(f"✗ Error with npx: {e}")
-    print("\nTrying alternative method...")
-
-# Alternative: Use Python prisma package directly
+# Step 2: Generate Prisma Client using Python package
+print("\nStep 2: Generating Prisma Client...")
 try:
     # Set environment variable for schema path
-    os.environ["PRISMA_SCHEMA_PATH"] = str(schema_path)
-    
+    os.environ["PRISMA_SCHEMA_PATH"] = str(schema_path)   
     result = subprocess.run(
         [sys.executable, "-m", "prisma", "py", "generate"],
         cwd=backend_dir,
         capture_output=True,
-        text=True
+        text=True,
+        check=False
     )
     if result.returncode == 0:
         print("✓ Prisma Client generated successfully!")
-        print(result.stdout)
+        if result.stdout:
+            print(result.stdout)
         sys.exit(0)
     else:
-        print(f"✗ Error: {result.stderr}")
+        print("✗ Error generating Prisma Client:")
+        print(result.stderr)
         sys.exit(1)
-except Exception as e:
+except (OSError, subprocess.SubprocessError) as e:
     print(f"✗ Error: {e}")
     sys.exit(1)
-

@@ -17,13 +17,6 @@ sqlite_cursor.execute("SELECT name, age, phone FROM patients WHERE phone = ?", (
 sqlite_cursor.execute("INSERT INTO patients (name, age, phone) VALUES (?, ?, ?)", (name, age, phone))
 ```
 
-### MongoDB (Direct Access):
-```python
-# Current way - Direct collection access
-collection.find_one({"phone": phone})
-collection.insert_one(patient_data)
-```
-
 ## ORM Approach (Alternative - For Future)
 
 With ORM (like SQLAlchemy), you'd use **Python classes** instead:
@@ -93,7 +86,7 @@ The `app/models/` folder is **reserved for future use** if you decide to:
 
 ## Your Current Setup
 
-You're using **raw SQL + MongoDB**, which is perfectly fine for:
+You're using **raw SQL + PostgreSQL**, which is perfectly fine for:
 - ✅ Simple queries
 - ✅ Full control
 - ✅ Easy to understand

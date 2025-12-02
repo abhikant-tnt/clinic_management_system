@@ -2,34 +2,93 @@
 generator client {
   provider = "prisma-client-python"
 }
-
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
+// Model name: "Patient" (PascalCase) - Used in code as: prisma_client.patient (lowercase)
+// Table name: "patients" (snake_case, plural) - Actual PostgreSQL table
 model Patient {
   id                Int      @id @default(autoincrement())
   tenant_id         String   @db.VarChar(100)
-  name              String   @db.VarChar(255)
-  age               Int?
-  gender            String   @db.VarChar(10)  // male, female, or other
-  phone             String   @db.VarChar(50)
-  email             String?  @db.VarChar(255)
-  date_of_birth     String?  @db.VarChar(50)
-  address           String?  @db.Text
-  registration_date String   @db.VarChar(50)
-  referral_source   String   @db.VarChar(20)  // doctor, self, friend, online
+  name              String   @db.VarChar(255)  // Required field
+  age               Int      // Required: 1-110 (validation in application layer)
+  gender            String   @db.VarChar(10)  // Required: male, female, or other
+  phone             String   @db.VarChar(10)  // Required: exactly 10 digits (validation in application layer)
+  email             String?  @db.VarChar(255)  // Optional
+  date_of_birth     String?  @db.VarChar(50)  // Optional: dd/mm/yyyy format
+  address           String?  @db.Text  // Optional
+  registration_date String   @db.VarChar(50)  // Required
+  referral_source   String   @db.VarChar(20)  // Required: doctor, self, friend, online
   referral_subcategory String? @db.VarChar(255)  // Optional subcategory
-  patient_status    String   @db.VarChar(30)  // Active, Inactive, VIP, Do not treat, Requires follow up
+  patient_status    String   @db.VarChar(30)  // Required: Active, Inactive, VIP, Do not treat, Requires follow up
   important_notes   String?  @db.Text  // Optional notes - local only, not synced to main server
-  billed_amount     Decimal  @db.Decimal(10, 2)
-  outstanding_amount Decimal @db.Decimal(10, 2)
+  billed_amount     Decimal? @db.Decimal(10, 2) @default(0)  // Optional: generated after visits
+  outstanding_amount Decimal? @db.Decimal(10, 2) @default(0)  // Optional: generated after visits
   synced_to_main    Boolean  @default(false)
   last_synced_at     DateTime?
+  visits            Visit[]  // Relation field: Access all visits for this patient (e.g., patient.visits)
+  documents         PatientDocument[]  // Relation field: Access all documents for this patient (e.g., patient.documents)
 
-  @@unique([tenant_id, phone])
-  @@index([tenant_id])
-  @@map("patients")
+  @@unique([tenant_id, phone])  // Unique constraint: Same phone can't exist twice per tenant
+  @@index([tenant_id])  // Index: Speeds up queries filtering by tenant_id
+  @@map("patients")  // Maps model "Patient" to database table "patients"
+}
+
+// Model name: "Visit" (PascalCase) - Used in code as: prisma_client.visit (lowercase)
+// Table name: "visits" (snake_case, plural) - Actual PostgreSQL table
+model Visit {
+  id                Int      @id @default(autoincrement())
+  patient_id        Int      // Foreign key column: References patients.id
+  tenant_id         String   @db.VarChar(100)
+  visit_date        String   @db.VarChar(50)  // Required: dd/mm/yyyy format
+  visit_time        String?  @db.VarChar(10)  // Optional: HH:MM format
+  notes             String?  @db.Text  // Clinical notes
+  diagnosis         String?  @db.Text  // Optional diagnosis
+  treatment         String?  @db.Text  // Optional treatment details
+  visit_status      String   @db.VarChar(20) @default("Completed")  // Completed, Cancelled, Follow-up
+  doctor_name       String?  @db.VarChar(255)  // Optional doctor name
+  visit_charge      Decimal? @db.Decimal(10, 2) @default(0)  // Visit fee (can be waived = 0)
+  medication_charge Decimal? @db.Decimal(10, 2) @default(0)  // Medication cost (optional)
+  total_charge      Decimal? @db.Decimal(10, 2) @default(0)  // Auto: visit_charge + medication_charge
+  is_waived         Boolean  @default(false)  // If visit charge is waived
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+  synced_to_main    Boolean  @default(false)
+  last_synced_at    DateTime?
+
+  patient           Patient  @relation(fields: [patient_id], references: [id], onDelete: Cascade)  // Relation field: Access parent patient (e.g., visit.patient.name)
+
+  @@index([patient_id])  // Index: Speeds up queries filtering by patient_id
+  @@index([tenant_id])  // Index: Speeds up queries filtering by tenant_id
+  @@index([visit_date])  // Index: Speeds up queries filtering/sorting by visit_date
+  @@map("visits")  // Maps model "Visit" to database table "visits"
+}
+
+// TODO: Invoice table - Placeholder for future implementation
+// Will track individual bills/receipts for payments
+// Fields: id, patient_id, visit_id (optional), invoice_type, amount, paid_amount, status, etc.
+
+// Model name: "PatientDocument" (PascalCase) - Used in code as: prisma_client.patientdocument (lowercase)
+// Table name: "patient_documents" (snake_case, plural) - Actual PostgreSQL table
+model PatientDocument {
+  id                Int      @id @default(autoincrement())
+  patient_id        Int      // Foreign key column: References patients.id
+  tenant_id         String   @db.VarChar(100)
+  filename          String   @db.VarChar(255)  // Stored filename
+  description       String?  @db.Text  // Optional description
+  file_type         String   @db.VarChar(50)  // PDF, image, etc.
+  file_size         BigInt   // File size in bytes
+  uploaded_at       DateTime @default(now())
+  synced_to_main    Boolean  @default(false)
+  last_synced_at    DateTime?
+
+  patient           Patient  @relation(fields: [patient_id], references: [id], onDelete: Cascade)  // Relation field: Access parent patient (e.g., doc.patient.name)
+
+  @@index([patient_id])  // Index: Speeds up queries filtering by patient_id
+  @@index([tenant_id])  // Index: Speeds up queries filtering by tenant_id
+  @@index([uploaded_at])  // Index: Speeds up queries sorting/filtering by upload date
+  @@map("patient_documents")  // Maps model "PatientDocument" to database table "patient_documents"
 }
 
