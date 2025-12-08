@@ -45,15 +45,11 @@ TENANT_ID=clinic_001
 # Security Settings (optional)
 SECRET_KEY=
 
-# Prisma DATABASE_URL (auto-generated from Local PostgreSQL settings above)
+# DATABASE_URL (auto-generated from Local PostgreSQL settings above)
 # DATABASE_URL will be constructed automatically from the settings above
 """
     ENV_FILE.write_text(env_content, encoding='utf-8')
-    print(f".env file created at {ENV_FILE}")
-    print("⚠️  Please edit .env and set:")
-    print("    - LOCAL_POSTGRES_PASSWORD (your local PostgreSQL password)")
-    print("    - MAIN_POSTGRES_PASSWORD (your main server PostgreSQL password)")
-    print("    - TENANT_ID (your unique clinic identifier - MUST be unique per clinic!)")
+    print(f".env file created at {ENV_FILE}\n⚠️  Please edit .env and set the correct LOCAL_POSTGRES_PASSWORD, MAIN_POSTGRES_PASSWORD, and TENANT_ID (unique per clinic)!")
 else:
     # Update existing .env file with correct port if needed (but never update password)
     try:
@@ -100,10 +96,10 @@ class Settings:
     # The default "clinic_001" is just a placeholder - change it to your unique clinic ID
     TENANT_ID: str = os.getenv("TENANT_ID", "clinic_001")
     
-    # Prisma DATABASE_URL (constructed from Local PostgreSQL settings)
+    # DATABASE_URL (constructed from Local PostgreSQL settings)
     @property
     def DATABASE_URL(self) -> str:
-        if not self.LOCAL_POSTGRES_PASSWORD:   #Construct Prisma DATABASE_URL from Local PostgreSQL settings
+        if not self.LOCAL_POSTGRES_PASSWORD:
             raise ValueError(
                 "LOCAL_POSTGRES_PASSWORD is not set in .env file. Please set your Local PostgreSQL password in the .env file before running the application."
             )
@@ -130,14 +126,7 @@ class Settings:
 
 settings = Settings()
 
-# Validate TENANT_ID on startup
 if settings.TENANT_ID == "clinic_001":
-    import warnings
-    warnings.warn(
-        "⚠️  WARNING: Using default TENANT_ID 'clinic_001'. "
-        "Please set a unique TENANT_ID in your .env file for this clinic! "
-        "Each clinic must have a different TENANT_ID to keep data separate.",
-        UserWarning
-    )
+    import warnings; warnings.warn("⚠️  WARNING: Using default TENANT_ID 'clinic_001'. Please set a unique TENANT_ID in your .env file for this clinic! Each clinic must have a different TENANT_ID to keep data separate.", UserWarning)
 
 

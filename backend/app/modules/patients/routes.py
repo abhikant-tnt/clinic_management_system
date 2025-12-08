@@ -2,28 +2,24 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import JSONResponse, FileResponse
 from pathlib import Path
 from typing import Optional
-from app.modules.patients.schemas import Patient
+from app.modules.patients.schemas import PatientCreate, PatientUpdate, calculate_age
 from app.common.schemas import ErrorResponse
 from app.core.database import (
     local_postgres_conn, 
     local_postgres_cursor, 
-    prisma_client,
-    sync_local_to_main
+    sync_local_to_main,
+    db_session
 )
+from app.core.models import PatientModel, DocumentsModel
+from sqlalchemy import and_
 from app.core.config import settings
 from app.core.storage import (
     create_patient_folders, 
     delete_patient_folder,
     get_patient_photo_path,
     get_patient_document_path,
-    get_patient_folder,
-    create_visit_folders,
-    get_visit_attachment_path,
-    get_visit_prescription_path,
-    get_visit_folder
+    get_patient_folder
 )
-from app.modules.patients.visit_schemas import VisitCreate, VisitUpdate
-from decimal import Decimal
 
 router = APIRouter()
 
@@ -31,125 +27,71 @@ def get_tenant_id() -> str:
     """Get tenant ID from settings"""
     return settings.TENANT_ID
 
-def patient_to_dict(patient) -> dict:
+def patient_to_dict(patient_data) -> dict:
     """Convert patient object to dictionary"""
-    if isinstance(patient, dict):
-        return patient
+    if isinstance(patient_data, dict):
+        return patient_data
     return {
-                    "id": patient.id,
-                    "tenant_id": patient.tenant_id,
-                    "name": patient.name,
-                    "age": patient.age,
-                    "gender": patient.gender,
-                    "phone": patient.phone,
-                    "email": patient.email,
-                    "date_of_birth": patient.date_of_birth,
-                    "address": patient.address,
-                    "registration_date": patient.registration_date,
-                    "referral_source": patient.referral_source,
-                    "referral_subcategory": patient.referral_subcategory,
-                    "patient_status": patient.patient_status,
-                    "important_notes": patient.important_notes,
-                    "billed_amount": float(patient.billed_amount) if patient.billed_amount else 0.0,
-                    "outstanding_amount": float(patient.outstanding_amount) if patient.outstanding_amount else 0.0
-                }
-
-def visit_to_dict(visit) -> dict:
-    """Convert visit object to dictionary"""
-    if isinstance(visit, dict):
-        return visit
-    return {
-        "id": visit.id,
-        "patient_id": visit.patient_id,
-        "tenant_id": visit.tenant_id,
-        "visit_date": visit.visit_date,
-        "visit_time": visit.visit_time,
-        "notes": visit.notes,
-        "diagnosis": visit.diagnosis,
-        "treatment": visit.treatment,
-        "visit_status": visit.visit_status,
-        "doctor_name": visit.doctor_name,
-        "visit_charge": float(visit.visit_charge) if visit.visit_charge else 0.0,
-        "medication_charge": float(visit.medication_charge) if visit.medication_charge else 0.0,
-        "total_charge": float(visit.total_charge) if visit.total_charge else 0.0,
-        "is_waived": visit.is_waived if visit.is_waived else False,
-        "created_at": visit.created_at.isoformat() if visit.created_at else None,
-        "updated_at": visit.updated_at.isoformat() if visit.updated_at else None
+        "id": patient_data.id,
+        "tenant_id": patient_data.tenant_id,
+        "title": patient_data.title,
+        "firstname": patient_data.firstname,
+        "lastname": patient_data.lastname,
+        "date_of_birth": patient_data.date_of_birth,
+        "age": patient_data.age,
+        "gender": patient_data.gender,
+        "phone": patient_data.phone,
+        "email": patient_data.email,
+        "address1": patient_data.address1,
+        "address2": patient_data.address2,
+        "city": patient_data.city,
+        "state": patient_data.state,
+        "pincode": patient_data.pincode,
+        "emergency_contact_name": patient_data.emergency_contact_name,
+        "emergency_contact_phone": patient_data.emergency_contact_phone,
+        "referral_source": patient_data.referral_source,
+        "referral_subcategory": patient_data.referral_subcategory,
+        "patient_status": patient_data.patient_status,
+        "important_notes": patient_data.important_notes,
+        "last_visit_date": patient_data.last_visit_date,
+        "registration_date": patient_data.registration_date,
+        "synced_to_main": patient_data.synced_to_main,
+        "last_synced_at": patient_data.last_synced_at.isoformat() if patient_data.last_synced_at else None
     }
 
 def check_patient_exists(patient_id: int, tenant_id: str) -> bool:
     """Check if patient exists"""
-    if prisma_client:
+    if db_session:
         try:
-            return prisma_client.patient.find_first(where={"id": patient_id, "tenant_id": tenant_id}) is not None
+            return db_session.query(PatientModel).filter(
+                and_(PatientModel.id == patient_id, PatientModel.tenant_id == tenant_id)
+            ).first() is not None
         except Exception:  # pylint: disable=broad-except
             return False
     elif local_postgres_cursor:
         try:
-            local_postgres_cursor.execute("SELECT id FROM patients WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
-            return local_postgres_cursor.fetchone() is not None
-        except Exception:  # pylint: disable=broad-except
-            return False
-    return False
-
-def check_visit_exists(visit_id: int, patient_id: int, tenant_id: str) -> bool:
-    """Check if visit exists"""
-    if prisma_client:
-        try:
-            return prisma_client.visit.find_first(where={"id": visit_id, "patient_id": patient_id, "tenant_id": tenant_id}) is not None
-        except Exception:  # pylint: disable=broad-except
-            return False
-    elif local_postgres_cursor:
-        try:
-            local_postgres_cursor.execute("SELECT id FROM visits WHERE id = %s AND patient_id = %s AND tenant_id = %s", (visit_id, patient_id, tenant_id))
+            local_postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
             return local_postgres_cursor.fetchone() is not None
         except Exception:  # pylint: disable=broad-except
             return False
     return False
 
 def get_patient_by_id(patient_id: int, tenant_id: str):
-    """Get patient by ID, returns patient object or None"""
-    if prisma_client:
+    """Get patient by ID, returns patient object or dict"""
+    if db_session:
         try:
-            return prisma_client.patient.find_first(where={"id": patient_id, "tenant_id": tenant_id})
+            return db_session.query(PatientModel).filter(
+                and_(PatientModel.id == patient_id, PatientModel.tenant_id == tenant_id)
+            ).first()
         except Exception:  # pylint: disable=broad-except
             return None
     elif local_postgres_cursor:
         try:
-            local_postgres_cursor.execute("SELECT * FROM patients WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
+            local_postgres_cursor.execute("SELECT * FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
             record = local_postgres_cursor.fetchone()
             if record:
                 columns = [desc[0] for desc in local_postgres_cursor.description]
                 return dict(zip(columns, record))
-        except Exception:  # pylint: disable=broad-except
-            return None
-    return None
-
-def get_visit_by_id(visit_id: int, patient_id: int, tenant_id: str):
-    """Get visit by ID, returns visit dict or None"""
-    if prisma_client:
-        try:
-            visit = prisma_client.visit.find_first(where={"id": visit_id, "patient_id": patient_id, "tenant_id": tenant_id})
-            return visit_to_dict(visit) if visit else None
-        except Exception:  # pylint: disable=broad-except
-            return None
-    elif local_postgres_cursor:
-        try:
-            local_postgres_cursor.execute("""
-                SELECT id, patient_id, tenant_id, visit_date, visit_time, notes, diagnosis, 
-                       treatment, visit_status, doctor_name, visit_charge, medication_charge, 
-                       total_charge, is_waived, created_at, updated_at
-                FROM visits WHERE id = %s AND patient_id = %s AND tenant_id = %s
-            """, (visit_id, patient_id, tenant_id))
-            record = local_postgres_cursor.fetchone()
-            if record:
-                columns = ["id", "patient_id", "tenant_id", "visit_date", "visit_time", "notes", 
-                          "diagnosis", "treatment", "visit_status", "doctor_name", "visit_charge", 
-                          "medication_charge", "total_charge", "is_waived", "created_at", "updated_at"]
-                visit_dict = dict(zip(columns, record))
-                visit_dict["created_at"] = visit_dict["created_at"].isoformat() if visit_dict.get("created_at") else None
-                visit_dict["updated_at"] = visit_dict["updated_at"].isoformat() if visit_dict.get("updated_at") else None
-                return visit_dict
         except Exception:  # pylint: disable=broad-except
             return None
     return None
@@ -165,14 +107,15 @@ def get_patients(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100
     sync_local_to_main()
     
     patients_list = []
-    if prisma_client:
+    if db_session:
         try:
-            patients_list = [patient_to_dict(p) for p in prisma_client.patient.find_many(where={"tenant_id": tenant_id})]
+            patients = db_session.query(PatientModel).filter(PatientModel.tenant_id == tenant_id).all()
+            patients_list = [patient_to_dict(p) for p in patients]
         except Exception as e:  # pylint: disable=broad-except
-            print(f"Error fetching patients (Prisma): {e}")
+            print(f"Error fetching patients (SQLAlchemy): {e}")
     elif local_postgres_cursor:
         try:
-            local_postgres_cursor.execute("SELECT * FROM patients WHERE tenant_id = %s", (tenant_id,))
+            local_postgres_cursor.execute("SELECT * FROM patients_table WHERE tenant_id = %s", (tenant_id,))
             columns = [desc[0] for desc in local_postgres_cursor.description]
             patients_list = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
         except Exception as e:  # pylint: disable=broad-except
@@ -211,13 +154,13 @@ def advanced_search_patients(
     
     # Search filter
     if q and q.strip():
-    search_term = q.strip()
+        search_term = q.strip()
         if search_term.isdigit():
             conditions.append("id = %s")
             params.append(int(search_term))
         else:
-            conditions.append("(name ILIKE %s OR phone ILIKE %s OR email ILIKE %s)")
-            params.extend([f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"])
+            conditions.append("(firstname ILIKE %s OR lastname ILIKE %s OR phone ILIKE %s OR email ILIKE %s)")
+            params.extend([f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"])
     
     # All filters
     if age_min is not None:
@@ -235,37 +178,41 @@ def advanced_search_patients(
     
     # Fetch patients
     patients_list = []
-    if prisma_client:
+    if local_postgres_cursor:
         try:
-            all_patients = prisma_client.patient.find_many(where={"tenant_id": tenant_id})
+            local_postgres_cursor.execute("SELECT * FROM patients_table WHERE tenant_id = %s", (tenant_id,))
+            columns = [desc[0] for desc in local_postgres_cursor.description]
+            all_patients = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
             search_lower = q.strip().lower() if q and q.strip() else None
             
-            for patient in all_patients:
+            for patient_data in all_patients:
                 # Search filter
                 if q and q.strip():
-                    if q.strip().isdigit() and patient.id != int(q.strip()):
+                    if q.strip().isdigit() and patient_data.id != int(q.strip()):
                         continue
                     elif not q.strip().isdigit():
-                        if not ((patient.name and search_lower in patient.name.lower()) or
-                               (patient.phone and search_lower in patient.phone.lower()) or
-                               (patient.email and search_lower in (patient.email.lower() if patient.email else ""))):
+                        firstname = (patient_data.firstname or "").lower() if hasattr(patient_data, 'firstname') else (patient_data.get("firstname") or "").lower()
+                        lastname = (patient_data.lastname or "").lower() if hasattr(patient_data, 'lastname') else (patient_data.get("lastname") or "").lower()
+                        phone = (patient_data.phone or "").lower() if hasattr(patient_data, 'phone') else (patient_data.get("phone") or "").lower()
+                        email = (patient_data.email or "").lower() if hasattr(patient_data, 'email') else (patient_data.get("email") or "").lower()
+                        if not (search_lower in firstname or search_lower in lastname or search_lower in phone or search_lower in email):
                             continue
                 
                 # Apply other filters
-                if age_min is not None and patient.age < age_min:
+                if age_min is not None and patient_data.age < age_min:
                     continue
-                if age_max is not None and patient.age > age_max:
+                if age_max is not None and patient_data.age > age_max:
                     continue
-                if gender and patient.gender != gender:
+                if gender and patient_data.gender != gender:
                     continue
-                if patient_status and patient.patient_status != patient_status:
+                if patient_status and patient_data.patient_status != patient_status:
                     continue
-                patients_list.append(patient_to_dict(patient))
+                patients_list.append(patient_to_dict(patient_data))
         except Exception as e:  # pylint: disable=broad-except
-            print(f"Error searching (Prisma): {e}")
-    elif local_postgres_cursor:
+            print(f"Error searching: {e}")
+    if local_postgres_cursor:
         try:
-            query = f"SELECT * FROM patients WHERE {' AND '.join(conditions)}"
+            query = f"SELECT * FROM patients_table WHERE {' AND '.join(conditions)}"
             local_postgres_cursor.execute(query, params)
             columns = [desc[0] for desc in local_postgres_cursor.description]
             for record in local_postgres_cursor.fetchall():
@@ -278,19 +225,10 @@ def advanced_search_patients(
         from datetime import datetime, timedelta
         cutoff = datetime.now() - timedelta(days=last_visit_days)
         filtered = []
-        for patient in patients_list:
-            patient_id = patient.get("id")
+        for patient_data in patients_list:
+            patient_id = patient_data.get("id")
             try:
-                if prisma_client:
-                    last_visit = prisma_client.visit.find_first(
-                        where={"patient_id": patient_id, "tenant_id": tenant_id},
-                        order={"visit_date": "desc"}
-                    )
-                    if last_visit and last_visit.visit_date:
-                        d, m, y = map(int, last_visit.visit_date.split('/'))
-                        if datetime(y, m, d) >= cutoff:
-                            filtered.append(patient)
-                elif local_postgres_cursor:
+                if local_postgres_cursor:
                     local_postgres_cursor.execute(
                         "SELECT MAX(visit_date) FROM visits WHERE patient_id = %s AND tenant_id = %s",
                         (patient_id, tenant_id)
@@ -299,7 +237,7 @@ def advanced_search_patients(
                     if result and result[0]:
                         d, m, y = map(int, result[0].split('/'))
                         if datetime(y, m, d) >= cutoff:
-                            filtered.append(patient)
+                            filtered.append(patient_data)
             except Exception:  # pylint: disable=broad-except
                 pass
         patients_list = filtered
@@ -310,7 +248,7 @@ def advanced_search_patients(
     elif sort_by == "oldest":
         patients_list.sort(key=lambda x: x.get("id", 0))
     elif sort_by == "alphabetic":
-        patients_list.sort(key=lambda x: x.get("name", "").lower())
+        patients_list.sort(key=lambda x: (x.get("firstname", "").lower(), x.get("lastname", "").lower()))
     
     # Pagination
     total = len(patients_list)
@@ -334,98 +272,102 @@ def advanced_search_patients(
 def get_patient(patient_id: int):
     """Get a single patient by ID for the current tenant"""
     tenant_id = get_tenant_id()
-    patient = get_patient_by_id(patient_id, tenant_id)
-            if patient:
-        return {"database": "Local PostgreSQL", "patient": patient_to_dict(patient)}
+    patient_data = get_patient_by_id(patient_id, tenant_id)
+    if patient_data:
+        return {"database": "Local PostgreSQL", "patient": patient_to_dict(patient_data)}
     raise HTTPException(status_code=404, detail=f"Patient with ID {patient_id} not found.")
 
 @router.post("/")
-def create_patient(patient: Patient):
-    """Create a new patient for the current tenant"""
+def create_patient(patient_data: PatientCreate):
+    """Create a new patient for the current tenant - age is calculated from date_of_birth"""
     tenant_id = get_tenant_id()
+    calculated_age = calculate_age(patient_data.date_of_birth)
     
-    # Initial Validation
-    # Note: Phone, age, email, and date_of_birth validation are handled by Pydantic validators in schemas.py
-    # Phone must be exactly 10 digits, age must be 1-110, email format validated, date_of_birth must be dd/mm/yyyy
-    if not patient.name:
-        return error_response("Name cannot be empty", 400)
-    # Handle optional amounts - default to 0.0 if not provided
-    billed_amount = patient.billed_amount if patient.billed_amount is not None else 0.0
-    outstanding_amount = patient.outstanding_amount if patient.outstanding_amount is not None else 0.0
-    if billed_amount < 0 or outstanding_amount < 0:
-        return error_response("Amounts cannot be negative", 400)
-    # Gender validation is automatically handled by Pydantic Literal type
+    # Validation
+    if not patient_data.firstname or not patient_data.firstname.strip():
+        return error_response("Firstname cannot be empty", 400)
+    if not patient_data.lastname or not patient_data.lastname.strip():
+        return error_response("Lastname cannot be empty", 400)
 
-    # Check for existing phone number in local database
-    postgres_existing = None
-    if prisma_client:
-        try:
-            postgres_existing = prisma_client.patient.find_first(
-                where={"phone": patient.phone, "tenant_id": tenant_id}
-            )
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Error checking phone in PostgreSQL (Prisma): {e}")
-    elif local_postgres_cursor:
-        try:
-            local_postgres_cursor.execute(
-                "SELECT id FROM patients WHERE phone = %s AND tenant_id = %s", 
-                (patient.phone, tenant_id)
-            )
-            postgres_existing = local_postgres_cursor.fetchone()
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Error checking phone in PostgreSQL: {e}")
-    
-    if postgres_existing:
-        return error_response("Patient with this phone number already exists for this tenant.", 400)
-    
-    # Set tenant_id if not provided
-    if not patient.tenant_id:
-        patient.tenant_id = tenant_id
-    
+    # Check for existing phone number
+    tenant_id_to_use = patient_data.tenant_id if patient_data.tenant_id else tenant_id
     save_successful = False
     new_patient_id = None
     
-    # Save to Local PostgreSQL
-    if prisma_client:
+    # Save using SQLAlchemy ORM
+    if db_session:
         try:
-            new_patient = prisma_client.patient.create(
-                data={
-                    "tenant_id": patient.tenant_id,
-                    "name": patient.name,
-                    "age": patient.age,
-                    "gender": patient.gender,
-                    "phone": patient.phone,
-                    "email": patient.email,
-                    "date_of_birth": patient.date_of_birth,
-                    "address": patient.address,
-                    "registration_date": patient.registration_date,
-                    "referral_source": patient.referral_source,
-                    "referral_subcategory": patient.referral_subcategory,
-                    "patient_status": patient.patient_status,
-                    "important_notes": patient.important_notes,
-                    "billed_amount": Decimal(str(billed_amount)),
-                    "outstanding_amount": Decimal(str(outstanding_amount)),
-                    "synced_to_main": False
-                }
+            # Check for existing phone
+            existing = db_session.query(PatientModel).filter(
+                and_(PatientModel.phone == patient_data.phone, PatientModel.tenant_id == tenant_id_to_use)
+            ).first()
+            if existing:
+                return error_response("Patient with this phone number already exists for this tenant.", 400)
+            
+            # Create new patient
+            new_patient = PatientModel(
+                tenant_id=tenant_id_to_use,
+                title=patient_data.title,
+                firstname=patient_data.firstname.lower(),
+                lastname=patient_data.lastname.lower(),
+                date_of_birth=patient_data.date_of_birth,
+                age=calculated_age,
+                gender=patient_data.gender.lower(),
+                phone=patient_data.phone,
+                email=patient_data.email.lower() if patient_data.email else None,
+                address1=patient_data.address1.lower(),
+                address2=patient_data.address2.lower() if patient_data.address2 else None,
+                city=patient_data.city.lower(),
+                state=patient_data.state.lower(),
+                pincode=patient_data.pincode,
+                emergency_contact_name=patient_data.emergency_contact_name.lower(),
+                emergency_contact_phone=patient_data.emergency_contact_phone,
+                registration_date=patient_data.registration_date,
+                referral_source=patient_data.referral_source.lower(),
+                referral_subcategory=patient_data.referral_subcategory.lower() if patient_data.referral_subcategory else None,
+                patient_status=patient_data.patient_status,
+                important_notes=patient_data.important_notes.lower() if patient_data.important_notes else None,
+                last_visit_date=patient_data.last_visit_date,
+                synced_to_main=False
             )
+            db_session.add(new_patient)
+            db_session.commit()
+            db_session.refresh(new_patient)
             new_patient_id = new_patient.id
-            print(f"Patient successfully saved to Local PostgreSQL with ID {new_patient_id} (Prisma).")
+            print(f"Patient successfully saved using SQLAlchemy with ID {new_patient_id}.")
             save_successful = True
         except Exception as e:  # pylint: disable=broad-except
-            print(f"Local PostgreSQL save FAILED (Prisma). Error: {str(e)}.")
+            db_session.rollback()
+            print(f"SQLAlchemy save FAILED. Error: {str(e)}.")
+    # Fallback to raw SQL
     elif local_postgres_cursor and local_postgres_conn:
         try:
+            # Check for existing phone
+            local_postgres_cursor.execute(
+                "SELECT id FROM patients_table WHERE phone = %s AND tenant_id = %s", 
+                (patient_data.phone, tenant_id_to_use)
+            )
+            if local_postgres_cursor.fetchone():
+                return error_response("Patient with this phone number already exists for this tenant.", 400)
+            
             local_postgres_cursor.execute("""
-                INSERT INTO patients (tenant_id, name, age, gender, phone, email, date_of_birth, address, 
+                INSERT INTO patients_table (tenant_id, title, firstname, lastname, date_of_birth, age, gender, phone, email,
+                                    address1, address2, city, state, pincode, emergency_contact_name, emergency_contact_phone,
                                     registration_date, referral_source, referral_subcategory, patient_status, 
-                                    important_notes, billed_amount, outstanding_amount, synced_to_main)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+                                    important_notes, last_visit_date, synced_to_main)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
                 RETURNING id
             """, (
-                patient.tenant_id, patient.name, patient.age, patient.gender, patient.phone, patient.email,
-                patient.date_of_birth, patient.address, patient.registration_date,
-                patient.referral_source, patient.referral_subcategory, patient.patient_status,
-                patient.important_notes, billed_amount, outstanding_amount
+                tenant_id_to_use, patient_data.title, patient_data.firstname.lower(), patient_data.lastname.lower(),
+                patient_data.date_of_birth, calculated_age, patient_data.gender.lower(), patient_data.phone,
+                patient_data.email.lower() if patient_data.email else None,
+                patient_data.address1.lower(), patient_data.address2.lower() if patient_data.address2 else None,
+                patient_data.city.lower(), patient_data.state.lower(), patient_data.pincode,
+                patient_data.emergency_contact_name.lower(), patient_data.emergency_contact_phone,
+                patient_data.registration_date, patient_data.referral_source.lower(),
+                patient_data.referral_subcategory.lower() if patient_data.referral_subcategory else None,
+                patient_data.patient_status, patient_data.important_notes.lower() if patient_data.important_notes else None,
+                patient_data.last_visit_date
             ))
             result = local_postgres_cursor.fetchone()
             new_patient_id = result[0] if result else None
@@ -435,78 +377,125 @@ def create_patient(patient: Patient):
         except Exception as e:  # pylint: disable=broad-except
             print(f"Local PostgreSQL save FAILED. Error: {str(e)}.")
     
-    # Sync to Main Server
     if save_successful and new_patient_id:
         sync_local_to_main()
         return {"message": f"Patient created successfully with ID {new_patient_id}."}
     else:
         raise HTTPException(
             status_code=503, 
-            detail="Could not save patient. Local PostgreSQL is unavailable. Please check your database connections."
+            detail="Could not save patient. Database is unavailable. Please check your database connections."
         )
 
 @router.put("/{patient_id}")
-def update_patient(patient_id: int, patient: Patient):
-    """Update an existing patient for the current tenant"""
+def update_patient(patient_id: int, patient_data: PatientUpdate):
+    """Update an existing patient for the current tenant - age is recalculated if date_of_birth is provided"""
     tenant_id = get_tenant_id()
     
-    # Validation
-    # Note: Phone, age, email, and date_of_birth validation are handled by Pydantic validators in schemas.py
-    if not patient.name:
-        return error_response("Name cannot be empty", 400)
+    # Get existing patient to preserve values not being updated
+    existing_patient_obj = get_patient_by_id(patient_id, tenant_id)
+    if not existing_patient_obj:
+        raise HTTPException(status_code=404, detail=f"Patient with ID {patient_id} not found for this tenant.")
     
-    # Handle optional amounts - default to existing values or 0.0
-    billed_amount = patient.billed_amount if patient.billed_amount is not None else 0.0
-    outstanding_amount = patient.outstanding_amount if patient.outstanding_amount is not None else 0.0
-    if billed_amount < 0 or outstanding_amount < 0:
-        return error_response("Amounts cannot be negative", 400)
+    existing_patient = patient_to_dict(existing_patient_obj)
     
-    # Ensure tenant_id matches
-    if not patient.tenant_id:
-        patient.tenant_id = tenant_id
+    # Calculate age if date_of_birth is being updated
+    calculated_age = calculate_age(patient_data.date_of_birth) if patient_data.date_of_birth else None
     
-    # Update in Local PostgreSQL
+    # Build update data - only include fields that are provided (not None)
+    update_data = {}
+    if patient_data.title is not None:
+        update_data["title"] = patient_data.title
+    if patient_data.firstname is not None:
+        if not patient_data.firstname.strip():
+            return error_response("Firstname cannot be empty", 400)
+        update_data["firstname"] = patient_data.firstname.lower()
+    if patient_data.lastname is not None:
+        if not patient_data.lastname.strip():
+            return error_response("Lastname cannot be empty", 400)
+        update_data["lastname"] = patient_data.lastname.lower()
+    if calculated_age is not None:
+        update_data["age"] = calculated_age
+    if patient_data.gender is not None:
+        update_data["gender"] = patient_data.gender.lower()
+    if patient_data.phone is not None:
+        update_data["phone"] = patient_data.phone
+    if patient_data.email is not None:
+        update_data["email"] = patient_data.email.lower() if patient_data.email else None
+    if patient_data.date_of_birth is not None:
+        update_data["date_of_birth"] = patient_data.date_of_birth
+    if patient_data.address1 is not None:
+        update_data["address1"] = patient_data.address1.lower()
+    if patient_data.address2 is not None:
+        update_data["address2"] = patient_data.address2.lower() if patient_data.address2 else None
+    if patient_data.city is not None:
+        update_data["city"] = patient_data.city.lower()
+    if patient_data.state is not None:
+        update_data["state"] = patient_data.state.lower()
+    if patient_data.pincode is not None:
+        update_data["pincode"] = patient_data.pincode
+    if patient_data.emergency_contact_name is not None:
+        update_data["emergency_contact_name"] = patient_data.emergency_contact_name.lower()
+    if patient_data.emergency_contact_phone is not None:
+        update_data["emergency_contact_phone"] = patient_data.emergency_contact_phone
+    if patient_data.registration_date is not None:
+        update_data["registration_date"] = patient_data.registration_date
+    if patient_data.referral_source is not None:
+        update_data["referral_source"] = patient_data.referral_source.lower()
+    if patient_data.referral_subcategory is not None:
+        update_data["referral_subcategory"] = patient_data.referral_subcategory.lower() if patient_data.referral_subcategory else None
+    if patient_data.patient_status is not None:
+        update_data["patient_status"] = patient_data.patient_status
+    if patient_data.important_notes is not None:
+        update_data["important_notes"] = patient_data.important_notes.lower() if patient_data.important_notes else None
+    if patient_data.last_visit_date is not None:
+        update_data["last_visit_date"] = patient_data.last_visit_date
+    update_data["synced_to_main"] = False  # Mark as unsynced after update
+    
+    if not update_data:
+        return error_response("No fields provided for update", 400)
+    
+    # Update using SQLAlchemy ORM
     postgres_updated = False
-    if prisma_client:
+    if db_session:
         try:
-            prisma_client.patient.update(
-                where={"id": patient_id, "tenant_id": tenant_id},
-                data={
-                    "name": patient.name,
-                    "age": patient.age,
-                    "gender": patient.gender,
-                    "phone": patient.phone,
-                    "email": patient.email,
-                    "date_of_birth": patient.date_of_birth,
-                    "address": patient.address,
-                    "registration_date": patient.registration_date,
-                    "referral_source": patient.referral_source,
-                    "referral_subcategory": patient.referral_subcategory,
-                    "patient_status": patient.patient_status,
-                    "important_notes": patient.important_notes,
-                    "billed_amount": Decimal(str(billed_amount)),
-                    "outstanding_amount": Decimal(str(outstanding_amount)),
-                    "synced_to_main": False  # Mark as unsynced after update
-                }
-            )
-            print(f"Local PostgreSQL patient ID {patient_id} updated (Prisma).")
+            patient = db_session.query(PatientModel).filter(
+                and_(PatientModel.id == patient_id, PatientModel.tenant_id == tenant_id)
+            ).first()
+            if not patient:
+                raise HTTPException(status_code=404, detail=f"Patient with ID {patient_id} not found for this tenant.")
+            
+            # Update fields
+            for key, value in update_data.items():
+                setattr(patient, key, value)
+            
+            db_session.commit()
+            db_session.refresh(patient)
+            print(f"SQLAlchemy patient ID {patient_id} updated.")
             postgres_updated = True
+        except HTTPException:
+            raise
         except Exception as e:  # pylint: disable=broad-except
-            print(f"Local PostgreSQL Update FAILED (Prisma). Error: {str(e)}.")
+            db_session.rollback()
+            print(f"SQLAlchemy update FAILED. Error: {str(e)}.")
+    # Fallback to raw SQL
     elif local_postgres_cursor and local_postgres_conn:
         try:
-            local_postgres_cursor.execute("""
-                UPDATE patients
-                SET name=%s, age=%s, gender=%s, phone=%s, email=%s, date_of_birth=%s, address=%s, 
-                    registration_date=%s, referral_source=%s, referral_subcategory=%s, patient_status=%s, 
-                    important_notes=%s, billed_amount=%s, outstanding_amount=%s, synced_to_main=FALSE
+            # Build dynamic UPDATE query
+            set_clauses = []
+            values = []
+            for key, value in update_data.items():
+                if key != "synced_to_main":
+                    set_clauses.append(f"{key}=%s")
+                    values.append(value)
+            set_clauses.append("synced_to_main=FALSE")
+            values.extend([patient_id, tenant_id])
+            
+            query = f"""
+                UPDATE patients_table
+                SET {', '.join(set_clauses)}
                 WHERE id=%s AND tenant_id=%s
-            """, (
-                patient.name, patient.age, patient.gender, patient.phone, patient.email, patient.date_of_birth,
-                patient.address, patient.registration_date, patient.referral_source, patient.referral_subcategory,
-                patient.patient_status, patient.important_notes, billed_amount, outstanding_amount, 
-                patient_id, tenant_id
-            ))
+            """
+            local_postgres_cursor.execute(query, values)
             local_postgres_conn.commit()
             if local_postgres_cursor.rowcount == 1:
                 print(f"Local PostgreSQL patient ID {patient_id} updated.")
@@ -517,11 +506,11 @@ def update_patient(patient_id: int, patient: Patient):
     # Sync to Main Server
     if postgres_updated:
         sync_local_to_main()
-        return {"message": f"Patient with ID {patient_id} updated successfully in Local PostgreSQL."}
+        return {"message": f"Patient with ID {patient_id} updated successfully."}
     else:
         raise HTTPException(
-            status_code=404, 
-            detail=f"Patient with ID {patient_id} not found for this tenant."
+            status_code=503, 
+            detail="Could not update patient. Database is unavailable. Please check your database connections."
         )
 
 @router.delete("/{patient_id}")
@@ -529,24 +518,28 @@ def delete_patient(patient_id: int):
     """Delete a patient by ID for the current tenant"""
     tenant_id = get_tenant_id()
     
-    # Delete from Local PostgreSQL
+    # Delete using SQLAlchemy ORM
     postgres_deleted = False
-    if prisma_client:
+    if db_session:
         try:
-            prisma_client.patient.delete(
-                where={"id": patient_id, "tenant_id": tenant_id}
-            )
-            print(f"Patient with ID {patient_id} successfully deleted from Local PostgreSQL (Prisma).")
-            postgres_deleted = True
-        except Exception as e:  # pylint: disable=broad-except
-            if "Record to delete does not exist" in str(e) or "not found" in str(e).lower():
-                print(f"Patient with ID {patient_id} not found in Local PostgreSQL for deletion.")
+            patient = db_session.query(PatientModel).filter(
+                and_(PatientModel.id == patient_id, PatientModel.tenant_id == tenant_id)
+            ).first()
+            if patient:
+                db_session.delete(patient)
+                db_session.commit()
+                print(f"Patient with ID {patient_id} successfully deleted using SQLAlchemy.")
+                postgres_deleted = True
             else:
-                print(f"Error deleting patient from Local PostgreSQL (Prisma): {e}.")
+                print(f"Patient with ID {patient_id} not found for deletion.")
+        except Exception as e:  # pylint: disable=broad-except
+            db_session.rollback()
+            print(f"Error deleting patient: {e}.")
+    # Fallback to raw SQL
     elif local_postgres_cursor and local_postgres_conn:
         try:
             local_postgres_cursor.execute(
-                "DELETE FROM patients WHERE id = %s AND tenant_id = %s", 
+                "DELETE FROM patients_table WHERE id = %s AND tenant_id = %s", 
                 (patient_id, tenant_id)
             )
             local_postgres_conn.commit()
@@ -591,12 +584,8 @@ async def upload_patient_photo(patient_id: int, file: UploadFile = File(...)):
     
     # Validate patient exists
     try:
-        if prisma_client:
-            patient = prisma_client.patient.find_first(where={"id": patient_id, "tenant_id": tenant_id})
-            if not patient:
-                raise HTTPException(status_code=404, detail="Patient not found")
-        elif local_postgres_cursor:
-            local_postgres_cursor.execute("SELECT id FROM patients WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
+        if local_postgres_cursor:
+            local_postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
             if not local_postgres_cursor.fetchone():
                 raise HTTPException(status_code=404, detail="Patient not found")
     except HTTPException:
@@ -662,24 +651,26 @@ async def upload_patient_document(patient_id: int, file: UploadFile = File(...),
         with open(doc_path, "wb") as f:
             f.write(content)
         
-        # Save metadata to database
+        # Save metadata to database using SQLAlchemy
         document_id = None
-        if prisma_client:
+        if db_session:
             try:
-                new_document = prisma_client.patientdocument.create(
-                    data={
-                        "patient_id": patient_id,
-                        "tenant_id": tenant_id,
-                        "filename": safe_filename,
-                        "description": description,
-                        "file_type": file_type,
-                        "file_size": file_size,
-                        "synced_to_main": False
-                    }
+                doc = DocumentsModel(
+                    patient_id=patient_id,
+                    tenant_id=tenant_id,
+                    filename=safe_filename,
+                    description=description,
+                    file_type=file_type,
+                    file_size=file_size,
+                    synced_to_main=False
                 )
-                document_id = new_document.id
+                db_session.add(doc)
+                db_session.commit()
+                db_session.refresh(doc)
+                document_id = doc.id
             except Exception as e:  # pylint: disable=broad-except
-                print(f"Error saving document metadata (Prisma): {e}")
+                db_session.rollback()
+                print(f"Error saving document metadata (SQLAlchemy): {e}")
         elif local_postgres_cursor and local_postgres_conn:
             try:
                 local_postgres_cursor.execute("""
@@ -724,23 +715,21 @@ def list_patient_files(patient_id: int):
         
         # List documents from database
         documents_list = []
-        if prisma_client:
+        if db_session:
             try:
-                documents = prisma_client.patientdocument.find_many(
-                    where={"patient_id": patient_id, "tenant_id": tenant_id},
-                    order={"uploaded_at": "desc"}
-                )
-                for doc in documents:
-                    documents_list.append({
-                        "id": doc.id,
-                        "filename": doc.filename,
-                        "description": doc.description,
-                        "file_type": doc.file_type,
-                        "file_size": doc.file_size,
-                        "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None
-                    })
+                docs = db_session.query(DocumentsModel).filter(
+                    and_(DocumentsModel.patient_id == patient_id, DocumentsModel.tenant_id == tenant_id)
+                ).order_by(DocumentsModel.uploaded_at.desc()).all()
+                documents_list = [{
+                    "id": doc.id,
+                    "filename": doc.filename,
+                    "description": doc.description,
+                    "file_type": doc.file_type,
+                    "file_size": doc.file_size,
+                    "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None
+                } for doc in docs]
             except Exception as e:  # pylint: disable=broad-except
-                print(f"Error fetching documents (Prisma): {e}")
+                print(f"Error fetching documents (SQLAlchemy): {e}")
         elif local_postgres_cursor:
             try:
                 local_postgres_cursor.execute("""
@@ -790,445 +779,39 @@ def download_patient_file(patient_id: int, file_type: str, filename: str):
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 # ============================================================
-# Patient Visit History & Clinical Notes Endpoints
+# Patient Billing Summary Endpoints
 # ============================================================
-
-@router.post("/{patient_id}/visits")
-def create_visit(patient_id: int, visit: VisitCreate):
-    """Create a new visit for a patient"""
-    tenant_id = get_tenant_id()
-    
-    if not check_patient_exists(patient_id, tenant_id):
-        return error_response(f"Patient with ID {patient_id} not found", 404)
-    
-    # Calculate total charge
-    visit_charge = visit.visit_charge if visit.visit_charge is not None else 0.0
-    medication_charge = visit.medication_charge if visit.medication_charge is not None else 0.0
-    total_charge = visit_charge + medication_charge
-    is_waived = visit.is_waived if visit.is_waived is not None else False
-    
-    # Create visit
-    new_visit_id = None
-    if prisma_client:
-        try:
-            new_visit = prisma_client.visit.create(
-                data={
-                    "patient_id": patient_id,
-                    "tenant_id": tenant_id,
-                    "visit_date": visit.visit_date,
-                    "visit_time": visit.visit_time,
-                    "notes": visit.notes,
-                    "diagnosis": visit.diagnosis,
-                    "treatment": visit.treatment,
-                    "visit_status": visit.visit_status,
-                    "doctor_name": visit.doctor_name,
-                    "visit_charge": Decimal(str(visit_charge)),
-                    "medication_charge": Decimal(str(medication_charge)),
-                    "total_charge": Decimal(str(total_charge)),
-                    "is_waived": is_waived,
-                    "synced_to_main": False
-                }
-            )
-            new_visit_id = new_visit.id
-            create_visit_folders(patient_id, new_visit_id, tenant_id)
-        except Exception as e:  # pylint: disable=broad-except
-            return error_response(f"Error creating visit: {str(e)}", 500)
-    elif local_postgres_cursor and local_postgres_conn:
-        try:
-            local_postgres_cursor.execute("""
-                INSERT INTO visits (patient_id, tenant_id, visit_date, visit_time, notes, diagnosis, 
-                                  treatment, visit_status, doctor_name, visit_charge, medication_charge, 
-                                  total_charge, is_waived, synced_to_main)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
-                RETURNING id
-            """, (
-                patient_id, tenant_id, visit.visit_date, visit.visit_time, visit.notes,
-                visit.diagnosis, visit.treatment, visit.visit_status, visit.doctor_name,
-                visit_charge, medication_charge, total_charge, is_waived
-            ))
-            result = local_postgres_cursor.fetchone()
-            new_visit_id = result[0] if result else None
-            local_postgres_conn.commit()
-            if new_visit_id:
-                create_visit_folders(patient_id, new_visit_id, tenant_id)
-        except Exception as e:  # pylint: disable=broad-except
-            return error_response(f"Error creating visit: {str(e)}", 500)
-    
-    if new_visit_id:
-        return {"message": f"Visit created successfully with ID {new_visit_id}", "visit_id": new_visit_id}
-    else:
-        return error_response("Failed to create visit", 500)
-
-@router.get("/{patient_id}/visits")
-def get_patient_visits(patient_id: int, page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100)):
-    """Get all visits for a patient with pagination"""
-    tenant_id = get_tenant_id()
-    
-    visits_list = []
-    if prisma_client:
-        try:
-            visits = prisma_client.visit.find_many(
-                where={"patient_id": patient_id, "tenant_id": tenant_id},
-                order={"visit_date": "desc", "created_at": "desc"}
-            )
-            visits_list = [visit_to_dict(visit) for visit in visits]
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Error fetching visits (Prisma): {e}")
-    elif local_postgres_cursor:
-        try:
-            local_postgres_cursor.execute("""
-                SELECT id, patient_id, tenant_id, visit_date, visit_time, notes, diagnosis, 
-                       treatment, visit_status, doctor_name, visit_charge, medication_charge, 
-                       total_charge, is_waived, created_at, updated_at
-                FROM visits 
-                WHERE patient_id = %s AND tenant_id = %s
-                ORDER BY visit_date DESC, created_at DESC
-            """, (patient_id, tenant_id))
-            columns = ["id", "patient_id", "tenant_id", "visit_date", "visit_time", "notes", 
-                      "diagnosis", "treatment", "visit_status", "doctor_name", "visit_charge", 
-                      "medication_charge", "total_charge", "is_waived", "created_at", "updated_at"]
-            for record in local_postgres_cursor.fetchall():
-                visit_dict = dict(zip(columns, record))
-                visit_dict["created_at"] = visit_dict["created_at"].isoformat() if visit_dict.get("created_at") else None
-                visit_dict["updated_at"] = visit_dict["updated_at"].isoformat() if visit_dict.get("updated_at") else None
-                visits_list.append(visit_dict)
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Error fetching visits: {e}")
-    
-    # Pagination
-    total = len(visits_list)
-    total_pages = (total + limit - 1) // limit if total > 0 else 1
-    skip = (page - 1) * limit
-    paginated_visits = visits_list[skip:skip + limit]
-    
-    return {
-        "patient_id": patient_id,
-        "visits": paginated_visits,
-        "pagination": {
-            "total": total,
-            "page": page,
-            "limit": limit,
-            "total_pages": total_pages,
-            "has_next": page < total_pages,
-            "has_prev": page > 1
-        }
-    }
-
-@router.get("/{patient_id}/visits/{visit_id}")
-def get_visit(patient_id: int, visit_id: int):
-    """Get a specific visit by ID"""
-    tenant_id = get_tenant_id()
-    visit_dict = get_visit_by_id(visit_id, patient_id, tenant_id)
-    if visit_dict:
-        return {"visit": visit_dict}
-    return error_response(f"Visit with ID {visit_id} not found for patient {patient_id}", 404)
-
-@router.put("/{patient_id}/visits/{visit_id}")
-def update_visit(patient_id: int, visit_id: int, visit: VisitUpdate):
-    """Update an existing visit"""
-    tenant_id = get_tenant_id()
-    
-    # Build update data (only include fields that are provided)
-    update_data = {}
-    if visit.visit_date is not None:
-        update_data["visit_date"] = visit.visit_date
-    if visit.visit_time is not None:
-        update_data["visit_time"] = visit.visit_time
-    if visit.notes is not None:
-        update_data["notes"] = visit.notes
-    if visit.diagnosis is not None:
-        update_data["diagnosis"] = visit.diagnosis
-    if visit.treatment is not None:
-        update_data["treatment"] = visit.treatment
-    if visit.visit_status is not None:
-        update_data["visit_status"] = visit.visit_status
-    if visit.doctor_name is not None:
-        update_data["doctor_name"] = visit.doctor_name
-    if visit.visit_charge is not None:
-        update_data["visit_charge"] = Decimal(str(visit.visit_charge))
-    if visit.medication_charge is not None:
-        update_data["medication_charge"] = Decimal(str(visit.medication_charge))
-    if visit.is_waived is not None:
-        update_data["is_waived"] = visit.is_waived
-    
-    # Recalculate total_charge if charge fields are updated
-    if visit.visit_charge is not None or visit.medication_charge is not None:
-        current_visit = get_visit_by_id(visit_id, patient_id, tenant_id) if (visit.visit_charge is None or visit.medication_charge is None) else None
-        visit_charge = visit.visit_charge if visit.visit_charge is not None else (float(current_visit.get("visit_charge", 0)) if current_visit else 0.0)
-        medication_charge = visit.medication_charge if visit.medication_charge is not None else (float(current_visit.get("medication_charge", 0)) if current_visit else 0.0)
-        update_data["total_charge"] = Decimal(str(visit_charge + medication_charge))
-    
-    if not update_data:
-        return error_response("No fields to update", 400)
-    
-    update_data["synced_to_main"] = False
-    
-    updated = False
-    if prisma_client:
-        try:
-            prisma_client.visit.update(
-                where={"id": visit_id, "patient_id": patient_id, "tenant_id": tenant_id},
-                data=update_data
-            )
-            updated = True
-        except Exception as e:  # pylint: disable=broad-except
-            return error_response(f"Visit not found or update failed: {str(e)}", 404)
-    elif local_postgres_cursor and local_postgres_conn:
-        try:
-            set_clause = ", ".join([f"{key} = %s" for key in update_data.keys()])
-            values = list(update_data.values()) + [visit_id, patient_id, tenant_id]
-            local_postgres_cursor.execute(f"""
-                UPDATE visits
-                SET {set_clause}
-                WHERE id = %s AND patient_id = %s AND tenant_id = %s
-            """, values)
-            local_postgres_conn.commit()
-            if local_postgres_cursor.rowcount == 1:
-                updated = True
-        except Exception as e:  # pylint: disable=broad-except
-            return error_response(f"Error updating visit: {str(e)}", 500)
-    
-    if updated:
-        return {"message": f"Visit {visit_id} updated successfully"}
-    else:
-        return error_response(f"Visit with ID {visit_id} not found", 404)
-
-@router.delete("/{patient_id}/visits/{visit_id}")
-def delete_visit(patient_id: int, visit_id: int):
-    """Delete a visit"""
-    tenant_id = get_tenant_id()
-    
-    deleted = False
-    if prisma_client:
-        try:
-            prisma_client.visit.delete(
-                where={"id": visit_id, "patient_id": patient_id, "tenant_id": tenant_id}
-            )
-            deleted = True
-        except Exception as e:  # pylint: disable=broad-except
-            if "not found" in str(e).lower():
-                return error_response(f"Visit with ID {visit_id} not found", 404)
-    elif local_postgres_cursor and local_postgres_conn:
-        try:
-            local_postgres_cursor.execute(
-                "DELETE FROM visits WHERE id = %s AND patient_id = %s AND tenant_id = %s",
-                (visit_id, patient_id, tenant_id)
-            )
-            local_postgres_conn.commit()
-            if local_postgres_cursor.rowcount == 1:
-                deleted = True
-        except Exception as e:  # pylint: disable=broad-except
-            return error_response(f"Error deleting visit: {str(e)}", 500)
-    
-    if deleted:
-        # Delete visit folder and all files
-        try:
-            visit_folder = get_visit_folder(patient_id, visit_id, tenant_id)
-            if visit_folder.exists():
-                import shutil
-                shutil.rmtree(visit_folder)
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Warning: Could not delete visit folder: {e}")
-        
-        return {"message": f"Visit {visit_id} deleted successfully"}
-    else:
-        return error_response(f"Visit with ID {visit_id} not found", 404)
-
-# ============================================================
-# Visit File Upload/Download Endpoints
-# ============================================================
-
-@router.post("/{patient_id}/visits/{visit_id}/attachments")
-async def upload_visit_attachment(patient_id: int, visit_id: int, file: UploadFile = File(...), description: str = Form(None)):
-    """Upload an attachment for a visit (PDF, images, lab reports, etc.)"""
-    tenant_id = get_tenant_id()
-    
-    # Validate file type
-    allowed_types = ["application/pdf", "image/jpeg", "image/jpg", "image/png"]
-    if file.content_type not in allowed_types:
-        return error_response("Only PDF, JPG, PNG, or JPEG files are allowed", 400)
-    
-    if not check_visit_exists(visit_id, patient_id, tenant_id):
-        return error_response("Visit not found", 404)
-    
-    # Generate safe filename
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    original_name = Path(file.filename).stem if file.filename else "attachment"
-    file_ext = Path(file.filename).suffix if file.filename else ".pdf"
-    safe_filename = f"{original_name}_{timestamp}{file_ext}"
-    
-    # Save file
-    try:
-        create_visit_folders(patient_id, visit_id, tenant_id)
-        attachment_path = get_visit_attachment_path(patient_id, visit_id, safe_filename, tenant_id)
-        with open(attachment_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        
-        return {
-            "message": "Attachment uploaded successfully",
-            "patient_id": patient_id,
-            "visit_id": visit_id,
-            "filename": safe_filename,
-            "description": description
-        }
-    except Exception as e:  # pylint: disable=broad-except
-        return error_response(f"Error uploading attachment: {str(e)}", 500)
-
-@router.post("/{patient_id}/visits/{visit_id}/prescription")
-async def upload_visit_prescription(patient_id: int, visit_id: int, file: UploadFile = File(...)):
-    """Upload a prescription PDF for a visit"""
-    tenant_id = get_tenant_id()
-    
-    # Validate file type (only PDF)
-    if file.content_type != "application/pdf":
-        return error_response("Only PDF files are allowed for prescriptions", 400)
-    
-    if not check_visit_exists(visit_id, patient_id, tenant_id):
-        return error_response("Visit not found", 404)
-    
-    # Generate safe filename
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_filename = f"prescription_{timestamp}.pdf"
-    
-    # Save file
-    try:
-        create_visit_folders(patient_id, visit_id, tenant_id)
-        prescription_path = get_visit_prescription_path(patient_id, visit_id, safe_filename, tenant_id)
-        with open(prescription_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        
-        return {
-            "message": "Prescription uploaded successfully",
-            "patient_id": patient_id,
-            "visit_id": visit_id,
-            "filename": safe_filename
-        }
-    except Exception as e:  # pylint: disable=broad-except
-        return error_response(f"Error uploading prescription: {str(e)}", 500)
-
-@router.get("/{patient_id}/visits/{visit_id}/files")
-def list_visit_files(patient_id: int, visit_id: int):
-    """List all files for a visit (attachments and prescription)"""
-    tenant_id = get_tenant_id()
-    
-    try:
-        visit_folder = get_visit_folder(patient_id, visit_id, tenant_id)
-        files_list = {"attachments": [], "prescription": []}
-        
-        # List attachment files
-        attachments_folder = visit_folder / "attachments"
-        if attachments_folder.exists():
-            files_list["attachments"] = [f.name for f in attachments_folder.iterdir() if f.is_file()]
-        
-        # List prescription files
-        prescription_folder = visit_folder / "prescription"
-        if prescription_folder.exists():
-            files_list["prescription"] = [f.name for f in prescription_folder.iterdir() if f.is_file()]
-        
-        return {"patient_id": patient_id, "visit_id": visit_id, "files": files_list}
-    except Exception as e:  # pylint: disable=broad-except
-        return JSONResponse(
-            status_code=500,
-            content=ErrorResponse(message=f"Error listing files: {str(e)}").model_dump()
-        )
-
-@router.get("/{patient_id}/visits/{visit_id}/download/{file_type}/{filename}")
-def download_visit_file(patient_id: int, visit_id: int, file_type: str, filename: str):
-    """Download a visit file. file_type: 'attachments' or 'prescription'"""
-    tenant_id = get_tenant_id()
-    
-    if file_type not in ["attachments", "prescription"]:
-        return error_response("Invalid file type. Use: attachments or prescription", 400)
-    
-    try:
-        if file_type == "attachments":
-            file_path = get_visit_attachment_path(patient_id, visit_id, filename, tenant_id)
-        else:
-            file_path = get_visit_prescription_path(patient_id, visit_id, filename, tenant_id)
-        
-        if not file_path.exists():
-            return error_response("File not found", 404)
-        
-        return FileResponse(path=str(file_path), filename=filename, media_type='application/octet-stream')
-    except Exception as e:  # pylint: disable=broad-except
-        return error_response(f"Error downloading file: {str(e)}", 500)
+# Visit routes removed - use appointments module instead
+# All visit functionality has been merged into appointments
+# When an appointment status = "Completed", it includes clinical fields (diagnosis, treatment, charges)
 
 # ============================================================
 # Patient Billing Summary Endpoints
 # ============================================================
-
 @router.get("/{patient_id}/billing/summary")
 def get_patient_billing_summary(patient_id: int):
-    """Get billing summary for a patient (total billed, total paid, total due, etc.)"""
+    """Get billing summary for a patient (calculated from appointments only - billing module will handle amounts)"""
     tenant_id = get_tenant_id()
     
-    # Verify patient exists and get patient data
-    patient_dict = None
-    if prisma_client:
-        try:
-            patient = prisma_client.patient.find_first(
-                where={"id": patient_id, "tenant_id": tenant_id}
-            )
-            if patient:
-                patient_dict = {
-                    "billed_amount": float(patient.billed_amount) if patient.billed_amount else 0.0,
-                    "outstanding_amount": float(patient.outstanding_amount) if patient.outstanding_amount else 0.0
-                }
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Error fetching patient (Prisma): {e}")
-    elif local_postgres_cursor:
-        try:
-            local_postgres_cursor.execute(
-                "SELECT billed_amount, outstanding_amount FROM patients WHERE id = %s AND tenant_id = %s",
-                (patient_id, tenant_id)
-            )
-            result = local_postgres_cursor.fetchone()
-            if result:
-                patient_dict = {
-                    "billed_amount": float(result[0]) if result[0] else 0.0,
-                    "outstanding_amount": float(result[1]) if result[1] else 0.0
-                }
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Error fetching patient: {e}")
-    
-    if not patient_dict:
+    # Verify patient exists
+    if not check_patient_exists(patient_id, tenant_id):
         return error_response(f"Patient with ID {patient_id} not found", 404)
     
-    # Calculate total billed from visits
-    total_billed_from_visits = 0.0
-    visits_with_charges = 0
-    if prisma_client:
-        try:
-            visits = prisma_client.visit.find_many(
-                where={"patient_id": patient_id, "tenant_id": tenant_id}
-            )
-            for visit in visits:
-                if visit.total_charge:
-                    total_billed_from_visits += float(visit.total_charge)
-                    visits_with_charges += 1
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Error fetching visits (Prisma): {e}")
-    elif local_postgres_cursor:
+    # Calculate total billed from completed appointments
+    total_billed_from_appointments = 0.0
+    appointments_with_charges = 0
+    if local_postgres_cursor:
         try:
             local_postgres_cursor.execute(
-                "SELECT total_charge FROM visits WHERE patient_id = %s AND tenant_id = %s",
+                "SELECT total_charge FROM appointments WHERE patient_id = %s AND tenant_id = %s AND status = 'Completed'",
                 (patient_id, tenant_id)
             )
             for row in local_postgres_cursor.fetchall():
                 if row[0]:
-                    total_billed_from_visits += float(row[0])
-                    visits_with_charges += 1
+                    total_billed_from_appointments += float(row[0])
+                    appointments_with_charges += 1
         except Exception as e:  # pylint: disable=broad-except
-            print(f"Error fetching visits: {e}")
-    
-    # Calculate totals
-    total_billed = total_billed_from_visits  # Sum of all visit charges
-    total_paid = patient_dict["billed_amount"]  # Manually set or auto-calculated
-    total_due = patient_dict["outstanding_amount"]  # Manually set or auto-calculated
+            print(f"Error fetching appointments: {e}")
     
     # Last payment date - placeholder (null for now, will be from invoices table in future)
     last_payment_date = None
@@ -1239,12 +822,10 @@ def get_patient_billing_summary(patient_id: int):
     return {
         "patient_id": patient_id,
         "billing_summary": {
-            "total_billed": total_billed,
-            "total_paid": total_paid,
-            "total_due": total_due,
+            "total_billed_from_appointments": total_billed_from_appointments,
             "last_payment_date": last_payment_date,
             "invoice_count": invoice_count,
-            "visits_with_charges": visits_with_charges
+            "completed_appointments_with_charges": appointments_with_charges
         },
-        "note": "Invoice table not implemented yet - using visit charges and patient billing fields"
+        "note": "Billing amounts removed from patient module. Will be handled in billing module. This shows appointment charges only."
     }

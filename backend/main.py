@@ -40,10 +40,9 @@ def home():
 @app.get("/health")
 def health_check():
     """Check database connection status"""
-    from app.core.database import (local_postgres_conn, main_postgres_connected,prisma_client)
+    from app.core.database import (local_postgres_conn, main_postgres_connected)
     local_status = "connected" if local_postgres_conn else "disconnected"
     main_status = "connected" if main_postgres_connected else "disconnected"
-    prisma_status = "available" if prisma_client else "unavailable"
     
     servers_available = sum([
         1 if local_postgres_conn else 0,
@@ -67,7 +66,6 @@ def health_check():
                 "database": settings.MAIN_POSTGRES_DB
             }
         },
-        "prisma": prisma_status,
         "servers_available": servers_available,
         "total_servers": 2
     }

@@ -18,7 +18,7 @@ You need the following installed **manually** (one-time setup):
 1.  **Python 3.x** - Download from https://www.python.org/downloads/
 2.  **PostgreSQL** - Download from https://www.postgresql.org/download/
 
-**Everything else installs automatically!** (Prisma, GraphQL, FastAPI, etc. - see installation steps below)
+**Everything else installs automatically!** (SQLAlchemy, GraphQL, FastAPI, etc. - see installation steps below)
 
 ### 📦 Installation on Doctor's Computer
 
@@ -27,48 +27,28 @@ You need the following installed **manually** (one-time setup):
 - ✅ PostgreSQL (one-time)
 
 **What installs automatically:**
-- ✅ All Python packages (Prisma, GraphQL, FastAPI, etc.) - via `pip install -r requirements.txt`
-- ✅ Prisma binaries (downloaded automatically when you run `generate_prisma.py`)
+- ✅ All Python packages (SQLAlchemy, GraphQL, FastAPI, etc.) - via `pip install -r requirements.txt`
 - ✅ Database tables (created automatically on first run)
 
-**No need to manually install Prisma or GraphQL separately!** They're included in `requirements.txt`.
+**No need to manually install SQLAlchemy or GraphQL separately!** They're included in `requirements.txt`.
 
 ### 🛠️ Installation
 
 1.  **Clone or download** this project folder.
 2.  **Navigate** to the project directory in your terminal.
-3.  **Install all Python packages** (this installs Prisma, GraphQL, FastAPI, etc. automatically):
+3.  **Install all Python packages** (this installs SQLAlchemy, GraphQL, FastAPI, etc. automatically):
 
     ```bash
     pip install -r requirements.txt
     ```
     
     **✅ This automatically installs:**
-    - Prisma (database ORM)
+    - SQLAlchemy (database ORM)
     - Strawberry GraphQL (GraphQL support)
     - FastAPI (web framework)
     - All other dependencies
     
     **No manual installation needed for these!**
-
-4.  **Generate Prisma Client** (optional, but recommended):
-
-    You can use the provided script:
-    ```bash
-    python generate_prisma.py
-    ```
-
-    Or manually:
-    ```bash
-    python -m prisma py fetch    # Downloads Prisma binaries (one-time)
-    python -m prisma py generate # Generates the Prisma Client
-    ```
-
-    **Note:** 
-    - The Python `prisma` package automatically downloads Prisma binaries from the internet (no Node.js required)
-    - Binaries are cached locally after first download
-    - If Prisma generation fails, the application will automatically fall back to raw SQL queries
-    - The app works fine without Prisma - it's optional but recommended for better type safety
 
 ### 💡 Installation Summary for Doctor's Computer
 
@@ -77,14 +57,13 @@ You need the following installed **manually** (one-time setup):
 | **Python** | ⚠️ Manual | One-time, required - download from python.org |
 | **PostgreSQL** | ⚠️ Manual | One-time, required - download from postgresql.org |
 | **Python Packages** | ✅ Automatic | Via `pip install -r requirements.txt` |
-| **Prisma** | ✅ Automatic | Included in Python packages - no separate install needed |
-| **Prisma Binaries** | ✅ Automatic | Downloaded when running `generate_prisma.py` |
+| **SQLAlchemy** | ✅ Automatic | Included in Python packages - no separate install needed |
 | **GraphQL (Strawberry)** | ✅ Automatic | Included in Python packages - no separate install needed |
 | **Database Tables** | ✅ Automatic | Created on first run |
 | **Database Schema** | ✅ Automatic | Created on first run |
 | **.env File** | ✅ Automatic | Created on first run (needs configuration) |
 
-**Answer:** When installing on a doctor's computer, only **Python** and **PostgreSQL** need to be installed manually. Everything else (Prisma, GraphQL, FastAPI, etc.) installs automatically when running `pip install -r requirements.txt`. No separate installation needed for Prisma or GraphQL!
+**Answer:** When installing on a doctor's computer, only **Python** and **PostgreSQL** need to be installed manually. Everything else (SQLAlchemy, GraphQL, FastAPI, etc.) installs automatically when running `pip install -r requirements.txt`. No separate installation needed!
 
 ### ▶️ Running the Server
 
