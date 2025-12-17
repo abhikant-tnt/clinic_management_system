@@ -63,7 +63,7 @@ else:
         if needs_update:
             ENV_FILE.write_text(env_content, encoding='utf-8')
             print("Updated .env file with correct PostgreSQL port (5433)")
-    except (OSError, PermissionError, IOError) as e:  # pylint: disable=broad-except
+    except (OSError, PermissionError, IOError) as e:
         print(f"Note: Could not auto-update .env file: {e}")
 
 # Load environment variables from .env file

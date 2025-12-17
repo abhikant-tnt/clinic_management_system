@@ -1,51 +1,74 @@
-"""
-GraphQL schema for Patient module using Strawberry
-"""
+"""GraphQL schema for Patient module (Strawberry)"""
 import re
 import strawberry
 from typing import Optional, List
-
-
 
 @strawberry.type
 class PatientType:
     """GraphQL Patient type"""
     id: Optional[int] = None
     tenant_id: Optional[str] = None
-    name: str
+    title: str
+    firstname: str
+    lastname: str
+    dob: str
     age: int
     gender: str
     phone: str
     email: Optional[str] = None
-    date_of_birth: Optional[str] = None
-    address: Optional[str] = None
+    primary_doctor: Optional[str] = None
+    address1: str
+    address2: Optional[str] = None
+    country: Optional[str] = None
+    city: str
+    state: str
+    pincode: str
+    emergency_contact_name: str
+    emergency_contact_phone: str
     registration_date: str
     referral_source: str
     referral_subcategory: Optional[str] = None
     patient_status: str
     important_notes: Optional[str] = None
-    billed_amount: float
-    outstanding_amount: float
-
+    last_visit_date: Optional[str] = None
+    purpose: Optional[str] = None
+    past_medical_record: Optional[str] = None
+    dermatological_history: Optional[str] = None
+    medications: Optional[str] = None
+    surgeries: Optional[str] = None
+    hormonal_issues: Optional[str] = None
 
 @strawberry.input
 class PatientInput:
     """GraphQL Patient input for creating/updating"""
-    name: str
-    age: int
+    title: str
+    firstname: str
+    lastname: str
+    dob: str
     gender: str
     phone: str
     email: Optional[str] = None
-    date_of_birth: Optional[str] = None
-    address: Optional[str] = None
+    primary_doctor: Optional[str] = None
+    address1: str
+    address2: Optional[str] = None
+    country: Optional[str] = None
+    city: str
+    state: str
+    pincode: str
+    emergency_contact_name: str
+    emergency_contact_phone: str
     registration_date: str
     referral_source: str
     referral_subcategory: Optional[str] = None
     patient_status: str
     important_notes: Optional[str] = None
-    billed_amount: float
-    outstanding_amount: float
-
+    last_visit_date: Optional[str] = None
+    purpose: Optional[str] = None
+    past_medical_record: Optional[str] = None
+    dermatological_history: Optional[str] = None
+    medications: Optional[str] = None
+    surgeries: Optional[str] = None
+    hormonal_issues: Optional[str] = None
 
 @strawberry.type
 class PaginationInfo:
@@ -57,13 +80,11 @@ class PaginationInfo:
     has_next: bool
     has_prev: bool
 
-
 @strawberry.type
 class PatientsResponse:
     """Response type for paginated patients"""
     patients: List[PatientType]
     pagination: PaginationInfo
-
 
 @strawberry.type
 class Query:
@@ -82,7 +103,7 @@ class Query:
             return None
         except HTTPException:
             return None
-    
+
     @strawberry.field
     def patients(
         self, 
@@ -91,12 +112,9 @@ class Query:
     ) -> PatientsResponse:
         """Get all patients with pagination"""
         from app.modules.patients.routes import get_patients
-        
         result = get_patients(page=page, limit=limit)
-        
         patients_list = [PatientType(**p) for p in result["patients"]]
         pagination = PaginationInfo(**result["pagination"])
-        
         return PatientsResponse(
             patients=patients_list,
             pagination=pagination
@@ -136,33 +154,45 @@ class Query:
                 )
             )
 
-
 @strawberry.type
 class Mutation:
     """GraphQL Mutation type"""
-    
     @strawberry.mutation
     def create_patient(self, patient: PatientInput) -> PatientType:
         """Create a new patient"""
         from app.modules.patients.routes import create_patient, get_patient
-        from app.modules.patients.schemas import Patient as PatientSchema
+        from app.modules.patients.schemas import PatientCreate
         from fastapi import HTTPException
         # Convert GraphQL input to Pydantic model
-        patient_data = PatientSchema(
-            name=patient.name,
-            age=patient.age,
+        patient_data = PatientCreate(
+            title=patient.title,
+            firstname=patient.firstname,
+            lastname=patient.lastname,
+            dob=patient.dob,
             gender=patient.gender,
             phone=patient.phone,
             email=patient.email,
-            date_of_birth=patient.date_of_birth,
-            address=patient.address,
+            primary_doctor=patient.primary_doctor,
+            address1=patient.address1,
+            address2=patient.address2,
+            country=patient.country,
+            city=patient.city,
+            state=patient.state,
+            pincode=patient.pincode,
+            emergency_contact_name=patient.emergency_contact_name,
+            emergency_contact_phone=patient.emergency_contact_phone,
             registration_date=patient.registration_date,
             referral_source=patient.referral_source,
             referral_subcategory=patient.referral_subcategory,
             patient_status=patient.patient_status,
             important_notes=patient.important_notes,
-            billed_amount=patient.billed_amount,
-            outstanding_amount=patient.outstanding_amount
+            last_visit_date=patient.last_visit_date,
+            purpose=patient.purpose,
+            past_medical_record=patient.past_medical_record,
+            dermatological_history=patient.dermatological_history,
+            medications=patient.medications,
+            surgeries=patient.surgeries,
+            hormonal_issues=patient.hormonal_issues
         )
         
         try:
@@ -180,7 +210,7 @@ class Mutation:
             raise ValueError("Patient created but could not retrieve ID from response")
         except HTTPException as e:
             raise ValueError(f"Failed to create patient: {e.detail}") from e
-    
+
     @strawberry.mutation
     def update_patient(
         self, 
@@ -189,25 +219,39 @@ class Mutation:
     ) -> Optional[PatientType]:
         """Update an existing patient"""
         from app.modules.patients.routes import update_patient, get_patient
-        from app.modules.patients.schemas import Patient as PatientSchema
+        from app.modules.patients.schemas import PatientUpdate
         from fastapi import HTTPException
         
         # Convert GraphQL input to Pydantic model
-        patient_data = PatientSchema(
-            name=patient.name,
-            age=patient.age,
+        patient_data = PatientUpdate(
+            title=patient.title,
+            firstname=patient.firstname,
+            lastname=patient.lastname,
+            dob=patient.dob,
             gender=patient.gender,
             phone=patient.phone,
             email=patient.email,
-            date_of_birth=patient.date_of_birth,
-            address=patient.address,
+            primary_doctor=patient.primary_doctor,
+            address1=patient.address1,
+            address2=patient.address2,
+            country=patient.country,
+            city=patient.city,
+            state=patient.state,
+            pincode=patient.pincode,
+            emergency_contact_name=patient.emergency_contact_name,
+            emergency_contact_phone=patient.emergency_contact_phone,
             registration_date=patient.registration_date,
             referral_source=patient.referral_source,
             referral_subcategory=patient.referral_subcategory,
             patient_status=patient.patient_status,
             important_notes=patient.important_notes,
-            billed_amount=patient.billed_amount,
-            outstanding_amount=patient.outstanding_amount
+            last_visit_date=patient.last_visit_date,
+            purpose=patient.purpose,
+            past_medical_record=patient.past_medical_record,
+            dermatological_history=patient.dermatological_history,
+            medications=patient.medications,
+            surgeries=patient.surgeries,
+            hormonal_issues=patient.hormonal_issues
         )
         
         try:
@@ -219,7 +263,7 @@ class Mutation:
             return None
         except HTTPException as e:
             raise ValueError(f"Failed to update patient: {e.detail}") from e
-    
+
     @strawberry.mutation
     def delete_patient(self, patient_id: int) -> bool:
         """Delete a patient by ID"""
@@ -232,7 +276,5 @@ class Mutation:
         except HTTPException:
             return False
 
-
 # Create the GraphQL schema
 schema = strawberry.Schema(query=Query, mutation=Mutation)
-

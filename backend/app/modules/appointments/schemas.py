@@ -7,11 +7,12 @@ class AppointmentCreate(BaseModel):
     """Schema for creating an appointment"""
     tenant_id: Optional[str] = None  # Will be set from settings if not provided
     patient_id: int
+    doctor_id: int  # Required: FK to staff(id)
     appointment_date: str  # Required: dd/mm/yyyy format
     appointment_time: Optional[str] = None  # Optional: HH:MM format
-    status: Literal["Active", "Completed", "Cancelled", "DNA"] = "Active"  # DNA = Did Not Attend
+    appointment_status: Literal["first time appointment", "follow up", "vip"] = "first time appointment"
     doctor_name: Optional[str] = None
-    appointment_type: Optional[str] = None  # For color coding in calendar (e.g., Consultation, Follow-up, Procedure)
+    appointment_type: Optional[str] = None  # e.g., Consultation, Follow-up, Procedure)
     notes: Optional[str] = None
     payment_pending: bool = False
     follow_up_date: Optional[str] = None  # Optional: dd/mm/yyyy format
@@ -21,7 +22,7 @@ class AppointmentCreate(BaseModel):
     visit_charge: Optional[float] = 0.0  # Visit fee (can be waived = 0)
     medication_charge: Optional[float] = 0.0  # Medication cost (optional)
     is_waived: Optional[bool] = False  # If visit charge is waived
-    
+
     @field_validator('appointment_date')
     @classmethod
     def validate_appointment_date(cls, v: str) -> str:
@@ -58,7 +59,7 @@ class AppointmentCreate(BaseModel):
             raise ValueError(f"Invalid time: {str(e)}")
         
         return v
-    
+
     @field_validator('follow_up_date')
     @classmethod
     def validate_follow_up_date(cls, v: Optional[str]) -> Optional[str]:
@@ -83,7 +84,7 @@ class AppointmentUpdate(BaseModel):
     """Schema for updating an appointment"""
     appointment_date: Optional[str] = None
     appointment_time: Optional[str] = None
-    status: Optional[Literal["Active", "Completed", "Cancelled", "DNA"]] = None
+    appointment_status: Optional[Literal["first time appointment", "follow up", "vip"]] = None
     doctor_name: Optional[str] = None
     appointment_type: Optional[str] = None
     notes: Optional[str] = None
@@ -95,7 +96,7 @@ class AppointmentUpdate(BaseModel):
     visit_charge: Optional[float] = None
     medication_charge: Optional[float] = None
     is_waived: Optional[bool] = None
-    
+
     @field_validator('appointment_date')
     @classmethod
     def validate_appointment_date(cls, v: Optional[str]) -> Optional[str]:
@@ -134,7 +135,7 @@ class AppointmentUpdate(BaseModel):
             raise ValueError(f"Invalid time: {str(e)}")
         
         return v
-    
+
     @field_validator('follow_up_date')
     @classmethod
     def validate_follow_up_date(cls, v: Optional[str]) -> Optional[str]:
@@ -162,7 +163,7 @@ class Appointment(BaseModel):
     patient_id: int
     appointment_date: str
     appointment_time: Optional[str] = None
-    status: Literal["Active", "Completed", "Cancelled", "DNA"]
+    appointment_status: Literal["first time appointment", "follow up", "vip"]
     doctor_name: Optional[str] = None
     appointment_type: Optional[str] = None
     notes: Optional[str] = None

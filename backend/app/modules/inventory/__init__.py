@@ -1,5 +1,3 @@
-from app.modules.inventory.routes import router
-
-__all__ = ["router"]
-
-
+# Inventory module - no router export needed
+# Router is imported directly in api.py to avoid circular dependencies
+__all__ = []

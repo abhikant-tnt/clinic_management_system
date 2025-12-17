@@ -29,9 +29,10 @@ def appointment_to_dict(appointment_data) -> dict:
         "id": appointment_data.id,
         "tenant_id": appointment_data.tenant_id,
         "patient_id": appointment_data.patient_id,
+        "doctor_id": appointment_data.doctor_id if hasattr(appointment_data, 'doctor_id') else None,
         "appointment_date": appointment_data.appointment_date,
         "appointment_time": appointment_data.appointment_time,
-        "status": appointment_data.status,
+        "appointment_status": appointment_data.appointment_status,
         "doctor_name": appointment_data.doctor_name,
         "appointment_type": appointment_data.appointment_type,
         "notes": appointment_data.notes,
@@ -54,13 +55,13 @@ def check_patient_exists(patient_id: int, tenant_id: str) -> bool:
             return db_session.query(PatientModel).filter(
                 and_(PatientModel.id == patient_id, PatientModel.tenant_id == tenant_id)
             ).first() is not None
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             return False
     elif local_postgres_cursor:
         try:
             local_postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
             return local_postgres_cursor.fetchone() is not None
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             return False
     return False
 
@@ -71,13 +72,13 @@ def check_appointment_exists(appointment_id: int, tenant_id: str) -> bool:
             return db_session.query(AppointmentsModel).filter(
                 and_(AppointmentsModel.id == appointment_id, AppointmentsModel.tenant_id == tenant_id)
             ).first() is not None
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             return False
     elif local_postgres_cursor:
         try:
             local_postgres_cursor.execute("SELECT id FROM appointments WHERE id = %s AND tenant_id = %s", (appointment_id, tenant_id))
             return local_postgres_cursor.fetchone() is not None
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             return False
     return False
 
@@ -88,7 +89,7 @@ def get_appointment_by_id(appointment_id: int, tenant_id: str):
             return db_session.query(AppointmentsModel).filter(
                 and_(AppointmentsModel.id == appointment_id, AppointmentsModel.tenant_id == tenant_id)
             ).first()
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             return None
     elif local_postgres_cursor:
         try:
@@ -101,12 +102,12 @@ def get_appointment_by_id(appointment_id: int, tenant_id: str):
             """, (appointment_id, tenant_id))
             record = local_postgres_cursor.fetchone()
             if record:
-                columns = ["id", "patient_id", "tenant_id", "appointment_date", "appointment_time", "status",
+                columns = ["id", "patient_id", "doctor_id", "tenant_id", "appointment_date", "appointment_time", "status",
                           "doctor_name", "appointment_type", "notes", "payment_pending", "follow_up_date",
                           "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                           "created_at", "updated_at"]
                 return dict(zip(columns, record))
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             return None
     return None
 
@@ -129,7 +130,7 @@ def get_tomorrow_date() -> str:
 def get_appointments(
     today: Optional[bool] = Query(None, description="Filter appointments for today"),
     tomorrow: Optional[bool] = Query(None, description="Filter appointments for tomorrow"),
-    status: Optional[Literal["Active", "Completed", "Cancelled", "DNA"]] = Query(None, description="Filter by status"),
+    appointment_status: Optional[Literal["first time appointment", "follow up", "vip"]] = Query(None, description="Filter by appointment status"),
     doctor_name: Optional[str] = Query(None, description="Filter by doctor name"),
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100)
@@ -148,15 +149,15 @@ def get_appointments(
             elif tomorrow:
                 query = query.filter(AppointmentsModel.appointment_date == get_tomorrow_date())
             
-            if status:
-                query = query.filter(AppointmentsModel.status == status)
+            if appointment_status:
+                query = query.filter(AppointmentsModel.appointment_status == appointment_status)
             
             if doctor_name:
                 query = query.filter(AppointmentsModel.doctor_name == doctor_name)
             
             appointments = query.order_by(AppointmentsModel.appointment_date, AppointmentsModel.appointment_time).all()
             appointments_list = [appointment_to_dict(apt) for apt in appointments]
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             print(f"Error fetching appointments (SQLAlchemy): {e}")
     elif local_postgres_cursor:
         try:
@@ -170,22 +171,22 @@ def get_appointments(
                 conditions.append("appointment_date = %s")
                 params.append(get_tomorrow_date())
             
-            if status:
-                conditions.append("status = %s")
-                params.append(status)
+                if appointment_status:
+                    conditions.append("appointment_status = %s")
+                    params.append(appointment_status)
             
             if doctor_name:
                 conditions.append("doctor_name = %s")
                 params.append(doctor_name)
             
-            query = f"SELECT id, patient_id, tenant_id, appointment_date, appointment_time, status, doctor_name, appointment_type, notes, payment_pending, follow_up_date, diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived, created_at, updated_at FROM appointments WHERE {' AND '.join(conditions)} ORDER BY appointment_date, appointment_time"
+            query = f"SELECT id, patient_id, tenant_id, appointment_date, appointment_time, appointment_status, doctor_name, appointment_type, notes, payment_pending, follow_up_date, diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived, created_at, updated_at FROM appointments WHERE {' AND '.join(conditions)} ORDER BY appointment_date, appointment_time"
             local_postgres_cursor.execute(query, params)
             columns = ["id", "patient_id", "tenant_id", "appointment_date", "appointment_time", "status",
                       "doctor_name", "appointment_type", "notes", "payment_pending", "follow_up_date",
                       "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                       "created_at", "updated_at"]
             appointments_list = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             print(f"Error fetching appointments: {e}")
     
     # Sort by date and time
@@ -214,11 +215,11 @@ def get_queue():
                 and_(
                     AppointmentsModel.tenant_id == tenant_id,
                     AppointmentsModel.appointment_date == today,
-                    AppointmentsModel.status == "Active"
+                    AppointmentsModel.appointment_status == "first time appointment"
                 )
             ).order_by(AppointmentsModel.appointment_time.asc()).all()
             appointments_list = [appointment_to_dict(apt) for apt in appointments]
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             print(f"Error fetching queue (SQLAlchemy): {e}")
     elif local_postgres_cursor:
         try:
@@ -228,7 +229,7 @@ def get_queue():
                        diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived,
                        created_at, updated_at
                 FROM appointments 
-                WHERE tenant_id = %s AND appointment_date = %s AND status = 'Active'
+                WHERE tenant_id = %s AND appointment_date = %s AND appointment_status = 'first time appointment'
                 ORDER BY appointment_time ASC
             """, (tenant_id, today))
             columns = ["id", "patient_id", "tenant_id", "appointment_date", "appointment_time", "status",
@@ -236,7 +237,7 @@ def get_queue():
                       "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                       "created_at", "updated_at"]
             appointments_list = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             print(f"Error fetching queue: {e}")
     
     return {"queue": appointments_list, "date": today, "total": len(appointments_list)}
@@ -249,6 +250,11 @@ def create_appointment(appointment: AppointmentCreate):
     # Check if patient exists
     if not check_patient_exists(appointment.patient_id, tenant_id):
         raise HTTPException(status_code=404, detail=f"Patient with ID {appointment.patient_id} not found.")
+    
+    # Check if doctor/staff exists
+    from app.modules.staff.routes import check_staff_exists
+    if not check_staff_exists(appointment.doctor_id, tenant_id):
+        raise HTTPException(status_code=404, detail=f"Staff/Doctor with ID {appointment.doctor_id} not found.")
     
     # Calculate total charge
     visit_charge = appointment.visit_charge if appointment.visit_charge is not None else 0.0
@@ -266,10 +272,11 @@ def create_appointment(appointment: AppointmentCreate):
         try:
             new_appointment = AppointmentsModel(
                 patient_id=appointment_data["patient_id"],
+                doctor_id=appointment_data["doctor_id"],
                 tenant_id=appointment_data["tenant_id"],
                 appointment_date=appointment_data["appointment_date"],
                 appointment_time=appointment_data["appointment_time"],
-                status=appointment_data["status"],
+                appointment_status=appointment_data["appointment_status"],
                 doctor_name=appointment_data.get("doctor_name"),
                 appointment_type=appointment_data.get("appointment_type"),
                 notes=appointment_data.get("notes"),
@@ -288,25 +295,25 @@ def create_appointment(appointment: AppointmentCreate):
             db_session.refresh(new_appointment)
             sync_local_to_main()  # Sync after creating appointment
             return {"database": "Local PostgreSQL", "appointment": appointment_to_dict(new_appointment)}
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             db_session.rollback()
             raise HTTPException(status_code=500, detail=f"Error creating appointment: {str(e)}")
     # Fallback to raw SQL
     elif local_postgres_cursor:
         try:
             local_postgres_cursor.execute("""
-                INSERT INTO appointments (patient_id, tenant_id, appointment_date, appointment_time, status,
+                INSERT INTO appointments (patient_id, doctor_id, tenant_id, appointment_date, appointment_time, status,
                                         doctor_name, appointment_type, notes, payment_pending, follow_up_date,
                                         diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, patient_id, tenant_id, appointment_date, appointment_time, status,
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, patient_id, doctor_id, tenant_id, appointment_date, appointment_time, status,
                          doctor_name, appointment_type, notes, payment_pending, follow_up_date,
                          diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived,
                          created_at, updated_at
             """, (
-                appointment_data["patient_id"], appointment_data["tenant_id"],
+                appointment_data["patient_id"], appointment_data["doctor_id"], appointment_data["tenant_id"],
                 appointment_data["appointment_date"], appointment_data["appointment_time"],
-                appointment_data["status"], appointment_data.get("doctor_name"),
+                appointment_data["appointment_status"], appointment_data.get("doctor_name"),
                 appointment_data.get("appointment_type"), appointment_data.get("notes"),
                 appointment_data.get("payment_pending", False), appointment_data.get("follow_up_date"),
                 appointment_data.get("diagnosis"), appointment_data.get("treatment"),
@@ -317,14 +324,14 @@ def create_appointment(appointment: AppointmentCreate):
             local_postgres_conn.commit()
             
             if record:
-                columns = ["id", "patient_id", "tenant_id", "appointment_date", "appointment_time", "status",
+                columns = ["id", "patient_id", "doctor_id", "tenant_id", "appointment_date", "appointment_time", "status",
                           "doctor_name", "appointment_type", "notes", "payment_pending", "follow_up_date",
                           "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                           "created_at", "updated_at"]
                 appointment_dict = dict(zip(columns, record))
                 sync_local_to_main()  # Sync after creating appointment
                 return {"database": "Local PostgreSQL", "appointment": appointment_dict}
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             local_postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error creating appointment: {str(e)}")
     
@@ -389,7 +396,7 @@ def update_appointment(appointment_id: int, appointment: AppointmentUpdate):
             return {"database": "Local PostgreSQL", "appointment": appointment_to_dict(appointment)}
         except HTTPException:
             raise
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             db_session.rollback()
             raise HTTPException(status_code=500, detail=f"Error updating appointment: {str(e)}")
     # Fallback to raw SQL
@@ -418,14 +425,14 @@ def update_appointment(appointment_id: int, appointment: AppointmentUpdate):
             local_postgres_conn.commit()
             
             if record:
-                columns = ["id", "patient_id", "tenant_id", "appointment_date", "appointment_time", "status",
+                columns = ["id", "patient_id", "doctor_id", "tenant_id", "appointment_date", "appointment_time", "status",
                           "doctor_name", "appointment_type", "notes", "payment_pending", "follow_up_date",
                           "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                           "created_at", "updated_at"]
                 appointment_dict = dict(zip(columns, record))
                 sync_local_to_main()  # Sync after updating appointment
                 return {"database": "Local PostgreSQL", "appointment": appointment_dict}
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             local_postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error updating appointment: {str(e)}")
     
@@ -453,7 +460,7 @@ def delete_appointment(appointment_id: int):
                 raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found.")
         except HTTPException:
             raise
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             db_session.rollback()
             raise HTTPException(status_code=500, detail=f"Error deleting appointment: {str(e)}")
     # Fallback to raw SQL
@@ -462,7 +469,7 @@ def delete_appointment(appointment_id: int):
             local_postgres_cursor.execute("DELETE FROM appointments WHERE id = %s AND tenant_id = %s", (appointment_id, tenant_id))
             local_postgres_conn.commit()
             return {"message": f"Appointment with ID {appointment_id} deleted successfully"}
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             local_postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error deleting appointment: {str(e)}")
     
@@ -481,9 +488,9 @@ def complete_appointment(appointment_id: int):
         try:
             local_postgres_cursor.execute("""
                 UPDATE appointments 
-                SET status = 'Completed', updated_at = CURRENT_TIMESTAMP
+                SET appointment_status = 'follow up', updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s AND tenant_id = %s
-                RETURNING id, patient_id, tenant_id, appointment_date, appointment_time, status,
+                RETURNING id, patient_id, tenant_id, appointment_date, appointment_time, appointment_status,
                          doctor_name, appointment_type, notes, payment_pending, follow_up_date,
                          diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived,
                          created_at, updated_at
@@ -492,13 +499,13 @@ def complete_appointment(appointment_id: int):
             local_postgres_conn.commit()
             
             if record:
-                columns = ["id", "patient_id", "tenant_id", "appointment_date", "appointment_time", "status",
+                columns = ["id", "patient_id", "tenant_id", "appointment_date", "appointment_time", "appointment_status",
                           "doctor_name", "appointment_type", "notes", "payment_pending", "follow_up_date",
                           "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                           "created_at", "updated_at"]
                 appointment_dict = dict(zip(columns, record))
                 return {"database": "Local PostgreSQL", "appointment": appointment_dict, "message": "Appointment marked as completed"}
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as e:
             local_postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error completing appointment: {str(e)}")
     

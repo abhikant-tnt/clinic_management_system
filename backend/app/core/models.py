@@ -6,6 +6,19 @@ from datetime import datetime
 
 Base = declarative_base()
 
+class StaffModel(Base):
+    """Staff model"""
+    __tablename__ = "staff"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(100), nullable=False, index=True)
+    firstname = Column(String(255), nullable=False)
+    lastname = Column(String(255), nullable=False)
+    speciality = Column(String(255), nullable=True)
+    phone = Column(String(10), nullable=False)
+    synced_to_main = Column(Boolean, default=False)
+    last_synced_at = Column(DateTime, nullable=True)
+
 class PatientModel(Base):
     """Patient model"""
     __tablename__ = "patients_table"
@@ -15,13 +28,15 @@ class PatientModel(Base):
     title = Column(String(10), nullable=False)
     firstname = Column(String(255), nullable=False)
     lastname = Column(String(255), nullable=False)
-    date_of_birth = Column(String(50), nullable=False)
+    dob = Column(String(50), nullable=False)
     age = Column(Integer, nullable=False)
     gender = Column(String(10), nullable=False)
     phone = Column(String(10), nullable=False)
     email = Column(String(255), nullable=True)
+    primary_doctor = Column(String(255), nullable=True)
     address1 = Column(Text, nullable=False)
     address2 = Column(Text, nullable=True)
+    country = Column(String(100), nullable=True)
     city = Column(String(100), nullable=False)
     state = Column(String(100), nullable=False)
     pincode = Column(String(10), nullable=False)
@@ -33,6 +48,12 @@ class PatientModel(Base):
     patient_status = Column(String(30), nullable=False)
     last_visit_date = Column(String(50), nullable=True)
     registration_date = Column(String(50), nullable=False)
+    purpose = Column(String(20), nullable=True)
+    past_medical_record = Column(Text, nullable=True, default="None")
+    dermatological_history = Column(Text, nullable=True, default="None")
+    medications = Column(Text, nullable=True, default="None")
+    surgeries = Column(Text, nullable=True, default="None")
+    hormonal_issues = Column(Text, nullable=True, default="None")
     synced_to_main = Column(Boolean, default=False)
     last_synced_at = Column(DateTime, nullable=True)
     # Relationships
@@ -48,10 +69,11 @@ class AppointmentsModel(Base):
     __tablename__ = "appointments"
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(Integer, ForeignKey("patients_table.id", ondelete="CASCADE"), nullable=False, index=True)
+    doctor_id = Column(Integer, ForeignKey("staff.id", ondelete="SET NULL"), nullable=False, index=True)
     tenant_id = Column(String(100), nullable=False, index=True)
     appointment_date = Column(String(50), nullable=False, index=True)
     appointment_time = Column(String(10), nullable=True)
-    status = Column(String(20), default="Active", index=True)
+    appointment_status = Column(String(30), default="first time appointment", index=True)
     doctor_name = Column(String(255), nullable=True, index=True)
     appointment_type = Column(String(50), nullable=True)
     notes = Column(Text, nullable=True)

@@ -8,7 +8,7 @@ from app.core.database import (
     db_session
 )
 from app.core.db_session import SessionLocal, get_db
-from app.core.models import PatientModel, AppointmentsModel, DocumentsModel
+from app.core.models import PatientModel, AppointmentsModel, DocumentsModel, StaffModel
 
 __all__ = [
     "settings",
@@ -22,7 +22,8 @@ __all__ = [
     "get_db",
     "PatientModel",
     "AppointmentsModel",
-    "DocumentsModel"
+    "DocumentsModel",
+    "StaffModel"
 ]
 
 

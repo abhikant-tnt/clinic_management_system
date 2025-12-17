@@ -3,9 +3,9 @@ from typing import Optional, Literal
 from datetime import datetime, date
 import re
 
-def calculate_age(date_of_birth: str) -> int:
-    """Calculate age from date_of_birth in dd/mm/yyyy format"""
-    day, month, year = map(int, date_of_birth.split('/'))
+def calculate_age(dob: str) -> int:
+    """Calculate age from dob in dd/mm/yyyy format"""
+    day, month, year = map(int, dob.split('/'))
     birth_date = date(year, month, day)
     today = date.today()
     return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
@@ -49,12 +49,14 @@ class PatientCreate(BaseModel):
     title: Literal["Mr", "Mrs", "Miss", "Ms", "Dr", "Prof"]  # Required dropdown
     firstname: str  # Required
     lastname: str  # Required
-    date_of_birth: str  # Required - used to calculate age automatically
+    dob: str  # Required - used to calculate age automatically
     gender: Literal["male", "female", "other"]
     phone: str  # Required: exactly 10 digits
     email: Optional[EmailStr] = None
+    primary_doctor: Optional[str] = None  # Will link to staff table later
     address1: str  # Required
     address2: Optional[str] = None  # Optional
+    country: Optional[str] = None  # Optional
     city: str  # Required
     state: str  # Required
     pincode: str  # Required: numbers only
@@ -63,28 +65,34 @@ class PatientCreate(BaseModel):
     registration_date: str
     referral_source: Literal["doctor", "self", "friend", "online"]
     referral_subcategory: Optional[str] = None
-    patient_status: Literal["Active", "Inactive", "VIP", "Do not treat", "Requires follow up"]
+    patient_status: Literal["checked_out", "cancelled", "confirmed", "schedule", "DNA"]
     important_notes: Optional[str] = None
     last_visit_date: Optional[str] = None  # Optional: dd/mm/yyyy format
-    
+    purpose: Optional[Literal["consultation", "procedure"]] = None
+    past_medical_record: Optional[str] = "None"
+    dermatological_history: Optional[str] = "None"
+    medications: Optional[str] = "None"
+    surgeries: Optional[str] = "None"
+    hormonal_issues: Optional[str] = "None"
+
     @field_validator('phone', 'emergency_contact_phone')
     @classmethod
     def validate_phone_fields(cls, v: str) -> str:
         return validate_phone(v)
-    
+
     @field_validator('pincode')
     @classmethod
     def validate_pincode(cls, v: str) -> str:
         return validate_pincode(v)
-    
-    @field_validator('date_of_birth', 'last_visit_date')
+
+    @field_validator('dob', 'last_visit_date')
     @classmethod
     def validate_dates(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
         return validate_date_format(v)
     
-    @field_validator('firstname', 'lastname', 'city', 'state', 'emergency_contact_name', 'referral_subcategory')
+    @field_validator('firstname', 'lastname', 'city', 'state', 'country', 'emergency_contact_name', 'referral_subcategory', 'primary_doctor')
     @classmethod
     def to_lowercase_fields(cls, v: Optional[str]) -> Optional[str]:
         return to_lowercase(v)
@@ -99,12 +107,14 @@ class PatientUpdate(BaseModel):
     title: Optional[Literal["Mr", "Mrs", "Miss", "Ms", "Dr", "Prof"]] = None
     firstname: Optional[str] = None
     lastname: Optional[str] = None
-    date_of_birth: Optional[str] = None  # If provided, age will be recalculated
+    dob: Optional[str] = None  # If provided, age will be recalculated
     gender: Optional[Literal["male", "female", "other"]] = None
     phone: Optional[str] = None
     email: Optional[EmailStr] = None
+    primary_doctor: Optional[str] = None
     address1: Optional[str] = None
     address2: Optional[str] = None
+    country: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
     pincode: Optional[str] = None
@@ -116,29 +126,35 @@ class PatientUpdate(BaseModel):
     patient_status: Optional[Literal["Active", "Inactive", "VIP", "Do not treat", "Requires follow up"]] = None
     important_notes: Optional[str] = None
     last_visit_date: Optional[str] = None
-    
+    purpose: Optional[Literal["consultation", "procedure"]] = None
+    past_medical_record: Optional[str] = None
+    dermatological_history: Optional[str] = None
+    medications: Optional[str] = None
+    surgeries: Optional[str] = None
+    hormonal_issues: Optional[str] = None
+
     @field_validator('phone', 'emergency_contact_phone')
     @classmethod
     def validate_phone_fields(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
         return validate_phone(v)
-    
+
     @field_validator('pincode')
     @classmethod
     def validate_pincode(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
         return validate_pincode(v)
-    
-    @field_validator('date_of_birth', 'last_visit_date')
+
+    @field_validator('dob', 'last_visit_date')
     @classmethod
     def validate_dates(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
         return validate_date_format(v)
     
-    @field_validator('firstname', 'lastname', 'city', 'state', 'emergency_contact_name', 'referral_subcategory')
+    @field_validator('firstname', 'lastname', 'city', 'state', 'country', 'emergency_contact_name', 'referral_subcategory', 'primary_doctor')
     @classmethod
     def to_lowercase_fields(cls, v: Optional[str]) -> Optional[str]:
         return to_lowercase(v)
@@ -155,13 +171,15 @@ class PatientModel(BaseModel):
     title: str
     firstname: str
     lastname: str
-    date_of_birth: str
-    age: int  # Calculated from date_of_birth
+    dob: str
+    age: int  # Calculated from dob
     gender: Literal["male", "female", "other"]
     phone: str
     email: Optional[EmailStr] = None
+    primary_doctor: Optional[str] = None
     address1: str
     address2: Optional[str] = None
+    country: Optional[str] = None
     city: str
     state: str
     pincode: str
@@ -169,13 +187,19 @@ class PatientModel(BaseModel):
     emergency_contact_phone: str
     referral_source: Literal["doctor", "self", "friend", "online"]
     referral_subcategory: Optional[str] = None
-    patient_status: Literal["Active", "Inactive", "VIP", "Do not treat", "Requires follow up"]
+    patient_status: Literal["checked_out", "cancelled", "confirmed", "schedule", "DNA"]
     important_notes: Optional[str] = None
     last_visit_date: Optional[str] = None
     registration_date: str
+    purpose: Optional[str] = None
+    past_medical_record: Optional[str] = None
+    dermatological_history: Optional[str] = None
+    medications: Optional[str] = None
+    surgeries: Optional[str] = None
+    hormonal_issues: Optional[str] = None
     synced_to_main: Optional[bool] = False
     last_synced_at: Optional[datetime] = None
-    
+
     @field_validator('age')
     @classmethod
     def validate_age(cls, v: int) -> int:
