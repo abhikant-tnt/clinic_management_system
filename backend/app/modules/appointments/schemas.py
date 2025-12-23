@@ -178,5 +178,3 @@ class Appointment(BaseModel):
     is_waived: Optional[bool] = False
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    synced_to_main: Optional[bool] = False
-    last_synced_at: Optional[datetime] = None

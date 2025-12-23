@@ -16,8 +16,11 @@ class StaffModel(Base):
     lastname = Column(String(255), nullable=False)
     speciality = Column(String(255), nullable=True)
     phone = Column(String(10), nullable=False)
-    synced_to_main = Column(Boolean, default=False)
-    last_synced_at = Column(DateTime, nullable=True)
+    username = Column(String(100), nullable=True, unique=True)
+    password_hash = Column(String(255), nullable=True)
+    user_type = Column(String(20), nullable=True, default='staff')
+    is_active = Column(Boolean, nullable=True, default=True)
+    last_login = Column(DateTime, nullable=True)
 
 class PatientModel(Base):
     """Patient model"""
@@ -54,8 +57,6 @@ class PatientModel(Base):
     medications = Column(Text, nullable=True, default="None")
     surgeries = Column(Text, nullable=True, default="None")
     hormonal_issues = Column(Text, nullable=True, default="None")
-    synced_to_main = Column(Boolean, default=False)
-    last_synced_at = Column(DateTime, nullable=True)
     # Relationships
     documents = relationship("DocumentsModel", back_populates="patient", cascade="all, delete-orphan")
     appointments = relationship("AppointmentsModel", back_populates="patient", cascade="all, delete-orphan")
@@ -87,8 +88,6 @@ class AppointmentsModel(Base):
     is_waived = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-    synced_to_main = Column(Boolean, default=False)
-    last_synced_at = Column(DateTime, nullable=True)
     # Relationships
     patient = relationship("PatientModel", back_populates="appointments")
 
@@ -103,8 +102,6 @@ class DocumentsModel(Base):
     file_type = Column(String(50), nullable=False)
     file_size = Column(BigInteger, nullable=False)
     uploaded_at = Column(DateTime, default=datetime.now, index=True)
-    synced_to_main = Column(Boolean, default=False)
-    last_synced_at = Column(DateTime, nullable=True)
     
     # Relationships
     patient = relationship("PatientModel", back_populates="documents")

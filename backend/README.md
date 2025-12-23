@@ -1,8 +1,7 @@
 # 🏥 Patient API Backend
 
-This is a **FastAPI** backend for managing patient records, using a **dual PostgreSQL architecture**:
-- **Local PostgreSQL**: Each clinic has its own local database instance
-- **Main Server PostgreSQL**: Centralized server that aggregates data from all clinics
+This is a **FastAPI** backend for managing patient records, using **PostgreSQL**:
+- **PostgreSQL**: Centralized database server
 - **Tenant ID**: Each clinic is identified by a unique `tenant_id` to keep data separate
 
 ---
@@ -93,7 +92,7 @@ You need the following installed **manually** (one-time setup):
 
 ### Step-by-Step .env Configuration
 
-The application uses a dual PostgreSQL architecture. Follow these steps to configure your `.env` file:
+Follow these steps to configure your `.env` file:
 
 #### Step 1: Locate or Create the .env File
 
@@ -107,47 +106,29 @@ backend/
 
 **If the file doesn't exist**, it will be automatically created when you first run the application. However, you can also create it manually.
 
-#### Step 2: Configure Local PostgreSQL Settings
+#### Step 2: Configure PostgreSQL Settings
 
-These settings are for your **local clinic database** (where data is stored first):
-
-```env
-# Local PostgreSQL Settings (for each clinic)
-LOCAL_POSTGRES_HOST=localhost
-LOCAL_POSTGRES_PORT=5433
-LOCAL_POSTGRES_USER=postgres
-LOCAL_POSTGRES_PASSWORD=your_actual_local_password  # ⚠️ REQUIRED: Replace with your actual password
-LOCAL_POSTGRES_DB=clinic_db_local
-```
-
-**What to change:**
-- `LOCAL_POSTGRES_PASSWORD`: Replace `your_actual_local_password` with your actual PostgreSQL password
-- `LOCAL_POSTGRES_PORT`: Change if your PostgreSQL uses a different port (default is 5432, but 5433 is used here)
-- `LOCAL_POSTGRES_DB`: You can change the database name if needed
-
-#### Step 3: Configure Main Server PostgreSQL Settings
-
-These settings are for the **centralized main server** (where data is synced):
+These settings are for your **PostgreSQL database**:
 
 ```env
-# Main Server PostgreSQL Settings (centralized server)
-MAIN_POSTGRES_HOST=your-main-server.com  # ⚠️ REQUIRED: Replace with your main server hostname or IP
+# PostgreSQL Settings
+MAIN_POSTGRES_HOST=your-server.com  # ⚠️ REQUIRED: Replace with your server hostname or IP
 MAIN_POSTGRES_PORT=5432
 MAIN_POSTGRES_USER=postgres
-MAIN_POSTGRES_PASSWORD=your_actual_main_password  # ⚠️ REQUIRED: Replace with your actual password
+MAIN_POSTGRES_PASSWORD=your_actual_password  # ⚠️ REQUIRED: Replace with your actual password
 MAIN_POSTGRES_DB=clinic_db_main
 ```
 
 **What to change:**
-- `MAIN_POSTGRES_HOST`: Replace `your-main-server.com` with:
+- `MAIN_POSTGRES_HOST`: Replace `your-server.com` with:
   - Your server's IP address (e.g., `192.168.1.100`)
-  - Your server's domain name (e.g., `main-server.example.com`)
-  - Or `localhost` if testing locally
-- `MAIN_POSTGRES_PASSWORD`: Replace with your main server's PostgreSQL password
+  - Your server's domain name (e.g., `server.example.com`)
+  - Or `localhost` if running locally
+- `MAIN_POSTGRES_PASSWORD`: Replace with your PostgreSQL password
 - `MAIN_POSTGRES_PORT`: Usually 5432, but change if different
 - `MAIN_POSTGRES_DB`: Change the database name if needed
 
-#### Step 4: Set Your Tenant ID
+#### Step 3: Set Your Tenant ID
 
 The tenant ID uniquely identifies your clinic:
 
@@ -169,14 +150,7 @@ TENANT_ID=clinic_001  # ⚠️ REQUIRED: Change to a unique ID for your clinic
 Here's a complete example of what your `.env` file should look like:
 
 ```env
-# Local PostgreSQL Settings (for each clinic)
-LOCAL_POSTGRES_HOST=localhost
-LOCAL_POSTGRES_PORT=5433
-LOCAL_POSTGRES_USER=postgres
-LOCAL_POSTGRES_PASSWORD=mylocalpass123
-LOCAL_POSTGRES_DB=clinic_db_local
-
-# Main Server PostgreSQL Settings (centralized server)
+# PostgreSQL Settings
 MAIN_POSTGRES_HOST=192.168.1.100
 MAIN_POSTGRES_PORT=5432
 MAIN_POSTGRES_USER=postgres
@@ -204,9 +178,8 @@ SECRET_KEY=
 
 ### Architecture
 
-- **Local PostgreSQL**: Stores data for the current clinic. All operations read/write to this database first.
-- **Main Server PostgreSQL**: Centralized database that receives synced data from all clinics. Data is separated by `tenant_id`.
-- **Synchronization**: Data is automatically synced from Local → Main Server after create/update operations.
+- **PostgreSQL**: Centralized database server. All operations read/write directly to this database.
+- **Tenant ID**: Data is separated by `tenant_id` to keep each clinic's data isolated.
 
 ### Troubleshooting
 
@@ -217,8 +190,8 @@ SECRET_KEY=
    - Right-click → Start (if stopped)
 
 2. **Verify port and password:**
-   - Check the port numbers in `.env` file: `LOCAL_POSTGRES_PORT` and `MAIN_POSTGRES_PORT`
-   - Check the passwords in `.env` file: `LOCAL_POSTGRES_PASSWORD` and `MAIN_POSTGRES_PASSWORD`
+   - Check the port number in `.env` file: `MAIN_POSTGRES_PORT`
+   - Check the password in `.env` file: `MAIN_POSTGRES_PASSWORD`
    - Verify `TENANT_ID` is set correctly
    - Make sure these match your PostgreSQL server settings
 
@@ -264,11 +237,7 @@ class Patient(BaseModel):
     date_of_birth: Optional[str] = None         # Date of birth (calendar widget on UI)
     address: Optional[str] = None               # Patient's address
     referral_subcategory: Optional[str] = None  # Optional referral subcategory (e.g., "Dr. Sharma", "Google")
-    important_notes: Optional[str] = None        # Optional notes (stored only in local server, NOT synced to main)
-    
-    # Internal Fields (not required in API requests)
-    synced_to_main: Optional[bool] = False      # Sync status (internal)
-    last_synced_at: Optional[datetime] = None    # Last sync timestamp (internal)
+    important_notes: Optional[str] = None        # Optional notes
 ```
 
 #### Field Validation Rules
@@ -277,7 +246,6 @@ class Patient(BaseModel):
 - **referral_source**: Must be exactly one of: `"doctor"`, `"self"`, `"friend"`, or `"online"`
 - **patient_status**: Must be exactly one of: `"Active"`, `"Inactive"`, `"VIP"`, `"Do not treat"`, or `"Requires follow up"`
 - **phone**: Must be unique per `tenant_id` (each clinic can have its own patient with the same phone number)
-- **important_notes**: This field is stored only in the local database and is NOT synced to the main server
 
 #### Example Patient Data
 

@@ -8,3 +8,6 @@ python-dotenv
 strawberry-graphql
 sqlalchemy
 email-validator
+PyJWT
+bcrypt>=4.0.0
+python-multipart

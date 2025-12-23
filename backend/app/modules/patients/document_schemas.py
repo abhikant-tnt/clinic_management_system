@@ -12,8 +12,6 @@ class PatientDocument(BaseModel):
     file_type: str
     file_size: int
     uploaded_at: Optional[datetime] = None
-    synced_to_main: Optional[bool] = False
-    last_synced_at: Optional[datetime] = None
 
 class PatientDocumentCreate(BaseModel):
     """Schema for creating a document record"""

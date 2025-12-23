@@ -22,8 +22,6 @@ BILLING_INVOICES_TABLE = """
         created_by INTEGER NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        synced_to_main BOOLEAN DEFAULT {},
-        last_synced_at TIMESTAMP,
         FOREIGN KEY (patient_id) REFERENCES patients_table(id) ON DELETE CASCADE,
         FOREIGN KEY (appointment_id) REFERENCES appointments(id) ON DELETE CASCADE,
         FOREIGN KEY (doctor_id) REFERENCES staff(id) ON DELETE SET NULL
@@ -43,8 +41,6 @@ BILLING_ITEMS_TABLE = """
         line_total NUMERIC(12,2) NOT NULL,
         inventory_item_id INTEGER,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        synced_to_main BOOLEAN DEFAULT {},
-        last_synced_at TIMESTAMP,
         FOREIGN KEY (invoice_id) REFERENCES billing_invoices(id) ON DELETE CASCADE,
         FOREIGN KEY (inventory_item_id) REFERENCES inventory_items(id) ON DELETE SET NULL
     )

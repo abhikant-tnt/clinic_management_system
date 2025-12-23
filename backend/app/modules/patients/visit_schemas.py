@@ -21,8 +21,6 @@ class Visit(BaseModel):
     is_waived: Optional[bool] = False  # If visit charge is waived
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    synced_to_main: Optional[bool] = False
-    last_synced_at: Optional[datetime] = None
 
     @field_validator('visit_date')
     @classmethod

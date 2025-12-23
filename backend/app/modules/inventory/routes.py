@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 import uuid
 from app.core.config import settings
-from app.core.database import local_postgres_conn, local_postgres_cursor, sync_local_to_main
+from app.core.database import postgres_conn, postgres_cursor
 from app.modules.inventory.schemas import InventoryItemCreate, InventoryItemUpdate, InventoryItem
 
 router = APIRouter()
@@ -50,14 +50,13 @@ def get_inventory_items(
     category: Optional[str] = None,
     low_stock: Optional[bool] = None
 ):
-    tenant_id_uuid = get_tenant_uuid()
-    sync_local_to_main()
+    tenant_id_str = str(get_tenant_uuid())
     
     items_list = []
-    if local_postgres_cursor:
+    if postgres_cursor:
         try:
             conditions = ["tenant_id = %s"]
-            params = [tenant_id_uuid]
+            params = [tenant_id_str]
             
             if category:
                 conditions.append("category = %s")
@@ -74,11 +73,11 @@ def get_inventory_items(
                 WHERE {' AND '.join(conditions)}
                 ORDER BY name
             """
-            local_postgres_cursor.execute(query, params)
-            columns = [desc[0] for desc in local_postgres_cursor.description]
-            items_list = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
+            postgres_cursor.execute(query, params)
+            columns = [desc[0] for desc in postgres_cursor.description]
+            items_list = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
         except Exception as e:
-            print(f"Error fetching inventory items: {e}")
+            raise HTTPException(status_code=500, detail=f"Error fetching inventory items: {str(e)}")
     
     total = len(items_list)
     total_pages = (total + limit - 1) // limit if total > 0 else 1
@@ -90,20 +89,20 @@ def get_inventory_items(
 
 @router.get("/{item_id}")
 def get_inventory_item(item_id: str):
-    tenant_id_uuid = get_tenant_uuid()
+    tenant_id_str = str(get_tenant_uuid())
     
-    if local_postgres_cursor:
+    if postgres_cursor:
         try:
-            local_postgres_cursor.execute("""
+            postgres_cursor.execute("""
                 SELECT id, tenant_id, name, category, unit, current_stock, min_stock_level,
                        unit_price, expiry_date, supplier_name, supplier_phone,
                        created_at, updated_at
                 FROM inventory_items
                 WHERE id = %s AND tenant_id = %s
-            """, (item_id, tenant_id_uuid))
-            record = local_postgres_cursor.fetchone()
+            """, (item_id, tenant_id_str))
+            record = postgres_cursor.fetchone()
             if record:
-                columns = [desc[0] for desc in local_postgres_cursor.description]
+                columns = [desc[0] for desc in postgres_cursor.description]
                 return dict(zip(columns, record))
             else:
                 raise HTTPException(status_code=404, detail=f"Inventory item with ID {item_id} not found")
@@ -117,18 +116,18 @@ def get_inventory_item(item_id: str):
 @router.post("/")
 def create_inventory_item(item_data: InventoryItemCreate):
     tenant_id_uuid = get_tenant_uuid()
-    tenant_id_to_use = uuid.UUID(item_data.tenant_id) if item_data.tenant_id else tenant_id_uuid
+    tenant_id_to_use = str(uuid.UUID(item_data.tenant_id)) if item_data.tenant_id else str(tenant_id_uuid)
     
-    if local_postgres_cursor and local_postgres_conn:
+    if postgres_cursor and postgres_conn:
         try:
             expiry_date_pg = convert_date_format(item_data.expiry_date)
             
-            local_postgres_cursor.execute("""
+            postgres_cursor.execute("""
                 INSERT INTO inventory_items (
                     tenant_id, name, category, unit, current_stock, min_stock_level,
-                    unit_price, expiry_date, supplier_name, supplier_phone, synced_to_main
+                    unit_price, expiry_date, supplier_name, supplier_phone
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 tenant_id_to_use, item_data.name.lower(), item_data.category.lower(),
@@ -137,34 +136,33 @@ def create_inventory_item(item_data: InventoryItemCreate):
                 item_data.supplier_phone
             ))
             
-            result = local_postgres_cursor.fetchone()
+            result = postgres_cursor.fetchone()
             item_id = str(result[0]) if result else None
-            local_postgres_conn.commit()
+            postgres_conn.commit()
             
             if item_id:
-                sync_local_to_main()
                 return {"message": f"Inventory item created successfully", "item_id": item_id}
             else:
                 raise HTTPException(status_code=500, detail="Failed to create inventory item")
                 
         except Exception as e:
-            local_postgres_conn.rollback()
+            postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error creating inventory item: {str(e)}")
     
     raise HTTPException(status_code=500, detail="Database connection not available")
 
 @router.put("/{item_id}")
 def update_inventory_item(item_id: str, item_data: InventoryItemUpdate):
-    tenant_id_uuid = get_tenant_uuid()
+    tenant_id_str = str(get_tenant_uuid())
     
-    if local_postgres_cursor and local_postgres_conn:
+    if postgres_cursor and postgres_conn:
         try:
             # Check if item exists
-            local_postgres_cursor.execute(
+            postgres_cursor.execute(
                 "SELECT id FROM inventory_items WHERE id = %s AND tenant_id = %s",
-                (item_id, tenant_id_uuid)
+                (item_id, tenant_id_str)
             )
-            if not local_postgres_cursor.fetchone():
+            if not postgres_cursor.fetchone():
                 raise HTTPException(status_code=404, detail=f"Inventory item with ID {item_id} not found")
             
             update_data = {}
@@ -188,71 +186,67 @@ def update_inventory_item(item_id: str, item_data: InventoryItemUpdate):
                 update_data["supplier_phone"] = item_data.supplier_phone
             
             update_data["updated_at"] = datetime.now()
-            update_data["synced_to_main"] = False
             
             if not update_data:
                 raise HTTPException(status_code=400, detail="No fields provided for update")
             
-            set_clauses = [f"{key} = %s" for key in update_data.keys() if key != "synced_to_main"]
-            values = [update_data[key] for key in update_data.keys() if key != "synced_to_main"]
+            set_clauses = [f"{key} = %s" for key in update_data.keys()]
+            values = [update_data[key] for key in update_data.keys()]
             values.append(item_id)
             values.append(item_id)
-            values.append(tenant_id_uuid)
+            values.append(tenant_id_str)
             
-            query = f"UPDATE inventory_items SET {', '.join(set_clauses)}, synced_to_main = FALSE WHERE id = %s AND tenant_id = %s"
-            local_postgres_cursor.execute(query, values)
-            local_postgres_conn.commit()
-            
-            sync_local_to_main()
+            query = f"UPDATE inventory_items SET {', '.join(set_clauses)} WHERE id = %s AND tenant_id = %s"
+            postgres_cursor.execute(query, values)
+            postgres_conn.commit()
             return {"message": f"Inventory item with ID {item_id} updated successfully"}
             
         except HTTPException:
             raise
         except Exception as e:
-            local_postgres_conn.rollback()
+            postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error updating inventory item: {str(e)}")
     
     raise HTTPException(status_code=500, detail="Database connection not available")
 
 @router.delete("/{item_id}")
 def delete_inventory_item(item_id: str):
-    tenant_id_uuid = get_tenant_uuid()
+    tenant_id_str = str(get_tenant_uuid())
     
-    if local_postgres_cursor and local_postgres_conn:
+    if postgres_cursor and postgres_conn:
         try:
-            local_postgres_cursor.execute(
+            postgres_cursor.execute(
                 "DELETE FROM inventory_items WHERE id = %s AND tenant_id = %s",
-                (item_id, tenant_id_uuid)
+                (item_id, tenant_id_str)
             )
-            local_postgres_conn.commit()
+            postgres_conn.commit()
             
-            if local_postgres_cursor.rowcount > 0:
-                sync_local_to_main()
+            if postgres_cursor.rowcount > 0:
                 return {"message": f"Inventory item with ID {item_id} deleted successfully"}
             else:
                 raise HTTPException(status_code=404, detail=f"Inventory item with ID {item_id} not found")
         except HTTPException:
             raise
         except Exception as e:
-            local_postgres_conn.rollback()
+            postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error deleting inventory item: {str(e)}")
     
     raise HTTPException(status_code=500, detail="Database connection not available")
 
 @router.get("/alerts/low-stock")
 def get_low_stock_alerts():
-    tenant_id_uuid = get_tenant_uuid()
+    tenant_id_str = str(get_tenant_uuid())
     
-    if local_postgres_cursor:
+    if postgres_cursor:
         try:
-            local_postgres_cursor.execute("""
+            postgres_cursor.execute("""
                 SELECT id, name, category, current_stock, min_stock_level, unit
                 FROM inventory_items
                 WHERE tenant_id = %s AND current_stock <= min_stock_level
                 ORDER BY (current_stock - min_stock_level) ASC
-            """, (tenant_id_uuid,))
-            columns = [desc[0] for desc in local_postgres_cursor.description]
-            alerts = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
+            """, (tenant_id_str,))
+            columns = [desc[0] for desc in postgres_cursor.description]
+            alerts = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
             return {"alerts": alerts, "count": len(alerts)}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error fetching low stock alerts: {str(e)}")
@@ -261,18 +255,18 @@ def get_low_stock_alerts():
 
 @router.get("/alerts/expiring")
 def get_expiring_items(days: int = Query(30, ge=1, le=365)):
-    tenant_id_uuid = get_tenant_uuid()
+    tenant_id_str = str(get_tenant_uuid())
     
-    if local_postgres_cursor:
+    if postgres_cursor:
         try:
-            local_postgres_cursor.execute("""
+            postgres_cursor.execute("""
                 SELECT id, name, category, expiry_date, current_stock, unit
                 FROM inventory_items
                 WHERE tenant_id = %s AND expiry_date <= CURRENT_DATE + INTERVAL '%s days'
                 ORDER BY expiry_date ASC
-            """, (tenant_id_uuid, days))
-            columns = [desc[0] for desc in local_postgres_cursor.description]
-            alerts = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
+            """, (tenant_id_str, days))
+            columns = [desc[0] for desc in postgres_cursor.description]
+            alerts = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
             return {"alerts": alerts, "count": len(alerts), "days_ahead": days}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error fetching expiring items: {str(e)}")

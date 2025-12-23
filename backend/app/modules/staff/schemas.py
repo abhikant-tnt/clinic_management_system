@@ -59,6 +59,4 @@ class Staff(BaseModel):
     lastname: str
     speciality: Optional[str] = None
     phone: str
-    synced_to_main: Optional[bool] = False
-    last_synced_at: Optional[datetime] = None
 

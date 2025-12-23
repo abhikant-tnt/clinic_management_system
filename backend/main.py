@@ -40,34 +40,18 @@ def home():
 @app.get("/health")
 def health_check():
     """Check database connection status"""
-    from app.core.database import (local_postgres_conn, main_postgres_connected)
-    local_status = "connected" if local_postgres_conn else "disconnected"
-    main_status = "connected" if main_postgres_connected else "disconnected"
-    
-    servers_available = sum([
-        1 if local_postgres_conn else 0,
-        1 if main_postgres_connected else 0
-    ])
+    from app.core.database import postgres_connected
+    status = "connected" if postgres_connected else "disconnected"
     
     return {
-        "status": "healthy" if local_postgres_conn else "degraded",
+        "status": "healthy" if postgres_connected else "degraded",
         "tenant_id": settings.TENANT_ID,
-        "databases": {
-            "local_server": {
-                "status": local_status,
-                "host": settings.LOCAL_POSTGRES_HOST,
-                "port": settings.LOCAL_POSTGRES_PORT,
-                "database": settings.LOCAL_POSTGRES_DB
-            },
-            "main_server": {
-                "status": main_status,
-                "host": settings.MAIN_POSTGRES_HOST,
-                "port": settings.MAIN_POSTGRES_PORT,
-                "database": settings.MAIN_POSTGRES_DB
-            }
-        },
-        "servers_available": servers_available,
-        "total_servers": 2
+        "database": {
+            "status": status,
+            "host": settings.MAIN_POSTGRES_HOST,
+            "port": settings.MAIN_POSTGRES_PORT,
+            "database": settings.MAIN_POSTGRES_DB
+        }
     }
 
 # Include REST API router

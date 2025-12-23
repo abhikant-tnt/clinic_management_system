@@ -197,8 +197,6 @@ class PatientModel(BaseModel):
     medications: Optional[str] = None
     surgeries: Optional[str] = None
     hormonal_issues: Optional[str] = None
-    synced_to_main: Optional[bool] = False
-    last_synced_at: Optional[datetime] = None
 
     @field_validator('age')
     @classmethod

@@ -6,9 +6,8 @@ from decimal import Decimal
 from app.modules.appointments.schemas import AppointmentCreate, AppointmentUpdate
 from app.common.schemas import ErrorResponse
 from app.core.database import (
-    local_postgres_conn, 
-    local_postgres_cursor, 
-    sync_local_to_main,
+    postgres_conn, 
+    postgres_cursor, 
     db_session
 )
 from app.core.models import AppointmentsModel, PatientModel
@@ -57,10 +56,10 @@ def check_patient_exists(patient_id: int, tenant_id: str) -> bool:
             ).first() is not None
         except Exception:
             return False
-    elif local_postgres_cursor:
+    elif postgres_cursor:
         try:
-            local_postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
-            return local_postgres_cursor.fetchone() is not None
+            postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
+            return postgres_cursor.fetchone() is not None
         except Exception:
             return False
     return False
@@ -74,10 +73,10 @@ def check_appointment_exists(appointment_id: int, tenant_id: str) -> bool:
             ).first() is not None
         except Exception:
             return False
-    elif local_postgres_cursor:
+    elif postgres_cursor:
         try:
-            local_postgres_cursor.execute("SELECT id FROM appointments WHERE id = %s AND tenant_id = %s", (appointment_id, tenant_id))
-            return local_postgres_cursor.fetchone() is not None
+            postgres_cursor.execute("SELECT id FROM appointments WHERE id = %s AND tenant_id = %s", (appointment_id, tenant_id))
+            return postgres_cursor.fetchone() is not None
         except Exception:
             return False
     return False
@@ -91,16 +90,16 @@ def get_appointment_by_id(appointment_id: int, tenant_id: str):
             ).first()
         except Exception:
             return None
-    elif local_postgres_cursor:
+    elif postgres_cursor:
         try:
-            local_postgres_cursor.execute("""
+            postgres_cursor.execute("""
                 SELECT id, patient_id, tenant_id, appointment_date, appointment_time, status,
                        doctor_name, appointment_type, notes, payment_pending, follow_up_date,
                        diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived,
                        created_at, updated_at
                 FROM appointments WHERE id = %s AND tenant_id = %s
             """, (appointment_id, tenant_id))
-            record = local_postgres_cursor.fetchone()
+            record = postgres_cursor.fetchone()
             if record:
                 columns = ["id", "patient_id", "doctor_id", "tenant_id", "appointment_date", "appointment_time", "status",
                           "doctor_name", "appointment_type", "notes", "payment_pending", "follow_up_date",
@@ -137,7 +136,6 @@ def get_appointments(
 ):
     """Get all appointments with optional filters (today, tomorrow, status, doctor)"""
     tenant_id = get_tenant_id()
-    sync_local_to_main()
     
     appointments_list = []
     if db_session:
@@ -158,8 +156,8 @@ def get_appointments(
             appointments = query.order_by(AppointmentsModel.appointment_date, AppointmentsModel.appointment_time).all()
             appointments_list = [appointment_to_dict(apt) for apt in appointments]
         except Exception as e:
-            print(f"Error fetching appointments (SQLAlchemy): {e}")
-    elif local_postgres_cursor:
+            pass
+    elif postgres_cursor:
         try:
             conditions = ["tenant_id = %s"]
             params = [tenant_id]
@@ -180,14 +178,14 @@ def get_appointments(
                 params.append(doctor_name)
             
             query = f"SELECT id, patient_id, tenant_id, appointment_date, appointment_time, appointment_status, doctor_name, appointment_type, notes, payment_pending, follow_up_date, diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived, created_at, updated_at FROM appointments WHERE {' AND '.join(conditions)} ORDER BY appointment_date, appointment_time"
-            local_postgres_cursor.execute(query, params)
+            postgres_cursor.execute(query, params)
             columns = ["id", "patient_id", "tenant_id", "appointment_date", "appointment_time", "status",
                       "doctor_name", "appointment_type", "notes", "payment_pending", "follow_up_date",
                       "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                       "created_at", "updated_at"]
-            appointments_list = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
+            appointments_list = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
         except Exception as e:
-            print(f"Error fetching appointments: {e}")
+            pass
     
     # Sort by date and time
     appointments_list.sort(key=lambda x: (x.get("appointment_date", ""), x.get("appointment_time", "")))
@@ -220,10 +218,10 @@ def get_queue():
             ).order_by(AppointmentsModel.appointment_time.asc()).all()
             appointments_list = [appointment_to_dict(apt) for apt in appointments]
         except Exception as e:
-            print(f"Error fetching queue (SQLAlchemy): {e}")
-    elif local_postgres_cursor:
+            pass
+    elif postgres_cursor:
         try:
-            local_postgres_cursor.execute("""
+            postgres_cursor.execute("""
                 SELECT id, patient_id, tenant_id, appointment_date, appointment_time, status,
                        doctor_name, appointment_type, notes, payment_pending, follow_up_date,
                        diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived,
@@ -236,9 +234,9 @@ def get_queue():
                       "doctor_name", "appointment_type", "notes", "payment_pending", "follow_up_date",
                       "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                       "created_at", "updated_at"]
-            appointments_list = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
+            appointments_list = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
         except Exception as e:
-            print(f"Error fetching queue: {e}")
+            pass
     
     return {"queue": appointments_list, "date": today, "total": len(appointments_list)}
 
@@ -288,20 +286,18 @@ def create_appointment(appointment: AppointmentCreate):
                 medication_charge=appointment_data["medication_charge"],
                 total_charge=appointment_data["total_charge"],
                 is_waived=appointment_data.get("is_waived", False),
-                synced_to_main=False
             )
             db_session.add(new_appointment)
             db_session.commit()
             db_session.refresh(new_appointment)
-            sync_local_to_main()  # Sync after creating appointment
-            return {"database": "Local PostgreSQL", "appointment": appointment_to_dict(new_appointment)}
+            return {"database": "PostgreSQL", "appointment": appointment_to_dict(new_appointment)}
         except Exception as e:
             db_session.rollback()
             raise HTTPException(status_code=500, detail=f"Error creating appointment: {str(e)}")
     # Fallback to raw SQL
-    elif local_postgres_cursor:
+    elif postgres_cursor:
         try:
-            local_postgres_cursor.execute("""
+            postgres_cursor.execute("""
                 INSERT INTO appointments (patient_id, doctor_id, tenant_id, appointment_date, appointment_time, status,
                                         doctor_name, appointment_type, notes, payment_pending, follow_up_date,
                                         diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived)
@@ -320,8 +316,8 @@ def create_appointment(appointment: AppointmentCreate):
                 appointment_data["visit_charge"], appointment_data["medication_charge"],
                 appointment_data["total_charge"], appointment_data.get("is_waived", False)
             ))
-            record = local_postgres_cursor.fetchone()
-            local_postgres_conn.commit()
+            record = postgres_cursor.fetchone()
+            postgres_conn.commit()
             
             if record:
                 columns = ["id", "patient_id", "doctor_id", "tenant_id", "appointment_date", "appointment_time", "status",
@@ -329,10 +325,9 @@ def create_appointment(appointment: AppointmentCreate):
                           "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                           "created_at", "updated_at"]
                 appointment_dict = dict(zip(columns, record))
-                sync_local_to_main()  # Sync after creating appointment
-                return {"database": "Local PostgreSQL", "appointment": appointment_dict}
+                return {"database": "PostgreSQL", "appointment": appointment_dict}
         except Exception as e:
-            local_postgres_conn.rollback()
+            postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error creating appointment: {str(e)}")
     
     raise HTTPException(status_code=500, detail="Database connection not available")
@@ -344,8 +339,8 @@ def get_appointment(appointment_id: int):
     appointment_data = get_appointment_by_id(appointment_id, tenant_id)
     if appointment_data:
         if isinstance(appointment_data, dict):
-            return {"database": "Local PostgreSQL", "appointment": appointment_data}
-        return {"database": "Local PostgreSQL", "appointment": appointment_to_dict(appointment_data)}
+            return {"database": "PostgreSQL", "appointment": appointment_data}
+        return {"database": "PostgreSQL", "appointment": appointment_to_dict(appointment_data)}
     raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found.")
 
 @router.put("/{appointment_id}")
@@ -388,19 +383,17 @@ def update_appointment(appointment_id: int, appointment: AppointmentUpdate):
             
             from datetime import datetime
             appointment.updated_at = datetime.now()
-            appointment.synced_to_main = False
             
             db_session.commit()
             db_session.refresh(appointment)
-            sync_local_to_main()  # Sync after updating appointment
-            return {"database": "Local PostgreSQL", "appointment": appointment_to_dict(appointment)}
+            return {"database": "PostgreSQL", "appointment": appointment_to_dict(appointment)}
         except HTTPException:
             raise
         except Exception as e:
             db_session.rollback()
             raise HTTPException(status_code=500, detail=f"Error updating appointment: {str(e)}")
     # Fallback to raw SQL
-    elif local_postgres_cursor:
+    elif postgres_cursor:
         try:
             set_clauses = []
             params = []
@@ -420,9 +413,9 @@ def update_appointment(appointment_id: int, appointment: AppointmentUpdate):
                          diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived,
                          created_at, updated_at
             """
-            local_postgres_cursor.execute(query, params)
-            record = local_postgres_cursor.fetchone()
-            local_postgres_conn.commit()
+            postgres_cursor.execute(query, params)
+            record = postgres_cursor.fetchone()
+            postgres_conn.commit()
             
             if record:
                 columns = ["id", "patient_id", "doctor_id", "tenant_id", "appointment_date", "appointment_time", "status",
@@ -430,10 +423,9 @@ def update_appointment(appointment_id: int, appointment: AppointmentUpdate):
                           "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                           "created_at", "updated_at"]
                 appointment_dict = dict(zip(columns, record))
-                sync_local_to_main()  # Sync after updating appointment
-                return {"database": "Local PostgreSQL", "appointment": appointment_dict}
+                return {"database": "PostgreSQL", "appointment": appointment_dict}
         except Exception as e:
-            local_postgres_conn.rollback()
+            postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error updating appointment: {str(e)}")
     
     raise HTTPException(status_code=500, detail="Database connection not available")
@@ -464,13 +456,13 @@ def delete_appointment(appointment_id: int):
             db_session.rollback()
             raise HTTPException(status_code=500, detail=f"Error deleting appointment: {str(e)}")
     # Fallback to raw SQL
-    elif local_postgres_cursor:
+    elif postgres_cursor:
         try:
-            local_postgres_cursor.execute("DELETE FROM appointments WHERE id = %s AND tenant_id = %s", (appointment_id, tenant_id))
-            local_postgres_conn.commit()
+            postgres_cursor.execute("DELETE FROM appointments WHERE id = %s AND tenant_id = %s", (appointment_id, tenant_id))
+            postgres_conn.commit()
             return {"message": f"Appointment with ID {appointment_id} deleted successfully"}
         except Exception as e:
-            local_postgres_conn.rollback()
+            postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error deleting appointment: {str(e)}")
     
     raise HTTPException(status_code=500, detail="Database connection not available")
@@ -484,9 +476,9 @@ def complete_appointment(appointment_id: int):
     if not appointment_data:
         raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found.")
     
-    if local_postgres_cursor:
+    if postgres_cursor:
         try:
-            local_postgres_cursor.execute("""
+            postgres_cursor.execute("""
                 UPDATE appointments 
                 SET appointment_status = 'follow up', updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s AND tenant_id = %s
@@ -495,8 +487,8 @@ def complete_appointment(appointment_id: int):
                          diagnosis, treatment, visit_charge, medication_charge, total_charge, is_waived,
                          created_at, updated_at
             """, (appointment_id, tenant_id))
-            record = local_postgres_cursor.fetchone()
-            local_postgres_conn.commit()
+            record = postgres_cursor.fetchone()
+            postgres_conn.commit()
             
             if record:
                 columns = ["id", "patient_id", "tenant_id", "appointment_date", "appointment_time", "appointment_status",
@@ -504,9 +496,9 @@ def complete_appointment(appointment_id: int):
                           "diagnosis", "treatment", "visit_charge", "medication_charge", "total_charge", "is_waived",
                           "created_at", "updated_at"]
                 appointment_dict = dict(zip(columns, record))
-                return {"database": "Local PostgreSQL", "appointment": appointment_dict, "message": "Appointment marked as completed"}
+                return {"database": "PostgreSQL", "appointment": appointment_dict, "message": "Appointment marked as completed"}
         except Exception as e:
-            local_postgres_conn.rollback()
+            postgres_conn.rollback()
             raise HTTPException(status_code=500, detail=f"Error completing appointment: {str(e)}")
     
     raise HTTPException(status_code=500, detail="Database connection not available")

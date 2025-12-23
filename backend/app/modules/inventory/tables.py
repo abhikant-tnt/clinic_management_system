@@ -17,9 +17,7 @@ INVENTORY_ITEMS_TABLE = """
         supplier_name TEXT NOT NULL,
         supplier_phone TEXT NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        synced_to_main BOOLEAN DEFAULT {},
-        last_synced_at TIMESTAMP
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
 """
 

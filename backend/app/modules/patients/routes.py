@@ -5,9 +5,8 @@ from typing import Optional
 from app.modules.patients.schemas import PatientCreate, PatientUpdate, calculate_age
 from app.common.schemas import ErrorResponse
 from app.core.database import (
-    local_postgres_conn, 
-    local_postgres_cursor, 
-    sync_local_to_main,
+    postgres_conn, 
+    postgres_cursor, 
     db_session,
     ensure_tables_exist
 )
@@ -24,10 +23,10 @@ from app.core.storage import (
 
 router = APIRouter()
 
-def get_tenant_id() -> str:  # get tenant ID from settings
+def get_tenant_id() -> str:
     return settings.TENANT_ID
 
-def patient_to_dict(patient_data) -> dict:  # convert patient object to dictionary
+def patient_to_dict(patient_data) -> dict:
     if isinstance(patient_data, dict):
         return patient_data
     return {
@@ -41,11 +40,10 @@ def patient_to_dict(patient_data) -> dict:  # convert patient object to dictiona
         "patient_status": patient_data.patient_status, "important_notes": patient_data.important_notes, "last_visit_date": patient_data.last_visit_date,
         "registration_date": patient_data.registration_date, "purpose": patient_data.purpose, "past_medical_record": patient_data.past_medical_record,
         "dermatological_history": patient_data.dermatological_history, "medications": patient_data.medications, "surgeries": patient_data.surgeries,
-        "hormonal_issues": patient_data.hormonal_issues, "synced_to_main": patient_data.synced_to_main,
-        "last_synced_at": patient_data.last_synced_at.isoformat() if patient_data.last_synced_at else None
+        "hormonal_issues": patient_data.hormonal_issues
     }
 
-def check_patient_exists(patient_id: int, tenant_id: str) -> bool:  # check if patient exists
+def check_patient_exists(patient_id: int, tenant_id: str) -> bool:
     if db_session:
         try:
             return db_session.query(PatientModel).filter(
@@ -53,15 +51,15 @@ def check_patient_exists(patient_id: int, tenant_id: str) -> bool:  # check if p
             ).first() is not None
         except Exception:
             return False
-    elif local_postgres_cursor:
+    elif postgres_cursor:
         try:
-            local_postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
-            return local_postgres_cursor.fetchone() is not None
+            postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
+            return postgres_cursor.fetchone() is not None
         except Exception:
             return False
     return False
 
-def get_patient_by_id(patient_id: int, tenant_id: str):  # get patient by ID, returns patient object or dict
+def get_patient_by_id(patient_id: int, tenant_id: str):
     if db_session:
         try:
             return db_session.query(PatientModel).filter(
@@ -69,18 +67,18 @@ def get_patient_by_id(patient_id: int, tenant_id: str):  # get patient by ID, re
             ).first()
         except Exception:
             return None
-    elif local_postgres_cursor:
+    elif postgres_cursor:
         try:
-            local_postgres_cursor.execute("SELECT * FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
-            record = local_postgres_cursor.fetchone()
+            postgres_cursor.execute("SELECT * FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
+            record = postgres_cursor.fetchone()
             if record:
-                columns = [desc[0] for desc in local_postgres_cursor.description]
+                columns = [desc[0] for desc in postgres_cursor.description]
                 return dict(zip(columns, record))
         except Exception:
             return None
     return None
 
-def error_response(message: str, status_code: int = 400) -> JSONResponse:  # create standardized error response
+def error_response(message: str, status_code: int = 400) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=ErrorResponse(message=message).model_dump())
 
 def _insert_patient_sql(patient_data: PatientCreate, calculated_age: int, tenant_id_to_use: str) -> tuple:
@@ -88,8 +86,8 @@ def _insert_patient_sql(patient_data: PatientCreate, calculated_age: int, tenant
                     address1, address2, country, city, state, pincode, emergency_contact_name, emergency_contact_phone,
                     registration_date, referral_source, referral_subcategory, patient_status, 
                     important_notes, last_visit_date, purpose, past_medical_record, dermatological_history,
-                    medications, surgeries, hormonal_issues, synced_to_main)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+                    medications, surgeries, hormonal_issues)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id"""
     params = (tenant_id_to_use, patient_data.title, patient_data.firstname.lower(), patient_data.lastname.lower(),
               patient_data.dob, calculated_age, patient_data.gender.lower(), patient_data.phone,
@@ -108,9 +106,8 @@ def _insert_patient_sql(patient_data: PatientCreate, calculated_age: int, tenant
     return insert_sql, params
 
 @router.get("/")
-def get_patients(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100)):  # get all patients with pagination
+def get_patients(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100)):
     tenant_id = get_tenant_id()
-    sync_local_to_main()
     
     patients_list = []
     if db_session:
@@ -118,14 +115,14 @@ def get_patients(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100
             patients = db_session.query(PatientModel).filter(PatientModel.tenant_id == tenant_id).all()
             patients_list = [patient_to_dict(p) for p in patients]
         except Exception as e:
-            print(f"Error fetching patients (SQLAlchemy): {e}")
-    elif local_postgres_cursor:
+            pass
+    elif postgres_cursor:
         try:
-            local_postgres_cursor.execute("SELECT * FROM patients_table WHERE tenant_id = %s", (tenant_id,))
-            columns = [desc[0] for desc in local_postgres_cursor.description]
-            patients_list = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
+            postgres_cursor.execute("SELECT * FROM patients_table WHERE tenant_id = %s", (tenant_id,))
+            columns = [desc[0] for desc in postgres_cursor.description]
+            patients_list = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
         except Exception as e:
-            print(f"Error fetching patients: {e}")
+            pass
     patients_list.sort(key=lambda x: x.get("id", 0))
     total = len(patients_list)
     total_pages = (total + limit - 1) // limit if total > 0 else 1
@@ -146,7 +143,7 @@ def advanced_search_patients(
     sort_by: Optional[str] = Query("newest", regex="^(newest|oldest|alphabetic)$"),
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100)
-):  # advanced search with filters, sorting, and pagination
+):
     tenant_id = get_tenant_id()
     conditions = ["tenant_id = %s"]
     params = [tenant_id]
@@ -171,13 +168,12 @@ def advanced_search_patients(
         conditions.append("patient_status = %s")
         params.append(patient_status)
     
-    # Fetch patients
     patients_list = []
-    if local_postgres_cursor:
+    if postgres_cursor:
         try:
-            local_postgres_cursor.execute("SELECT * FROM patients_table WHERE tenant_id = %s", (tenant_id,))
-            columns = [desc[0] for desc in local_postgres_cursor.description]
-            all_patients = [dict(zip(columns, r)) for r in local_postgres_cursor.fetchall()]
+            postgres_cursor.execute("SELECT * FROM patients_table WHERE tenant_id = %s", (tenant_id,))
+            columns = [desc[0] for desc in postgres_cursor.description]
+            all_patients = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
             search_lower = q.strip().lower() if q and q.strip() else None
             for patient_data in all_patients:
                 if q and q.strip():
@@ -200,16 +196,16 @@ def advanced_search_patients(
                     continue
                 patients_list.append(patient_to_dict(patient_data))
         except Exception as e:
-            print(f"Error searching: {e}")
-    if local_postgres_cursor:
+            pass
+    if postgres_cursor:
         try:
             query = f"SELECT * FROM patients_table WHERE {' AND '.join(conditions)}"
-            local_postgres_cursor.execute(query, params)
-            columns = [desc[0] for desc in local_postgres_cursor.description]
-            for record in local_postgres_cursor.fetchall():
+            postgres_cursor.execute(query, params)
+            columns = [desc[0] for desc in postgres_cursor.description]
+            for record in postgres_cursor.fetchall():
                 patients_list.append(dict(zip(columns, record)))
         except Exception as e:
-            print(f"Error searching: {e}")
+            pass
     if last_visit_days:
         from datetime import datetime, timedelta
         cutoff = datetime.now() - timedelta(days=last_visit_days)
@@ -217,12 +213,12 @@ def advanced_search_patients(
         for patient_data in patients_list:
             patient_id = patient_data.get("id")
             try:
-                if local_postgres_cursor:
-                    local_postgres_cursor.execute(
+                if postgres_cursor:
+                    postgres_cursor.execute(
                         "SELECT MAX(visit_date) FROM visits WHERE patient_id = %s AND tenant_id = %s",
                         (patient_id, tenant_id)
                     )
-                    result = local_postgres_cursor.fetchone()
+                    result = postgres_cursor.fetchone()
                     if result and result[0]:
                         d, m, y = map(int, result[0].split('/'))
                         if datetime(y, m, d) >= cutoff:
@@ -248,19 +244,18 @@ def advanced_search_patients(
     }
 
 @router.get("/{patient_id}")
-def get_patient(patient_id: int):  # get a single patient by ID for the current tenant
+def get_patient(patient_id: int):
     tenant_id = get_tenant_id()
     patient_data = get_patient_by_id(patient_id, tenant_id)
     if patient_data:
-        return {"database": "Local PostgreSQL", "patient": patient_to_dict(patient_data)}
+        return {"database": "PostgreSQL", "patient": patient_to_dict(patient_data)}
     raise HTTPException(status_code=404, detail=f"Patient with ID {patient_id} not found.")
 
 @router.post("/")
-def create_patient(patient_data: PatientCreate):  # create a new patient for the current tenant - age is calculated from dob
+def create_patient(patient_data: PatientCreate):
     tenant_id = get_tenant_id()
     calculated_age = calculate_age(patient_data.dob)
     
-    # Validation
     if not patient_data.firstname or not patient_data.firstname.strip():
         return error_response("Firstname cannot be empty", 400)
     if not patient_data.lastname or not patient_data.lastname.strip():
@@ -288,55 +283,50 @@ def create_patient(patient_data: PatientCreate):  # create a new patient for the
                 important_notes=patient_data.important_notes.lower() if patient_data.important_notes else None, last_visit_date=patient_data.last_visit_date,
                 purpose=patient_data.purpose, past_medical_record=patient_data.past_medical_record or "None",
                 dermatological_history=patient_data.dermatological_history or "None", medications=patient_data.medications or "None",
-                surgeries=patient_data.surgeries or "None", hormonal_issues=patient_data.hormonal_issues or "None", synced_to_main=False
+                surgeries=patient_data.surgeries or "None", hormonal_issues=patient_data.hormonal_issues or "None"
             )
             db_session.add(new_patient)
             db_session.commit()
             db_session.refresh(new_patient)
             new_patient_id = new_patient.id
-            print(f"Patient successfully saved using SQLAlchemy with ID {new_patient_id}.")
             save_successful = True
-        except Exception as e:
+        except Exception:
             db_session.rollback()
-            print(f"SQLAlchemy save FAILED. Error: {str(e)}.")
             save_successful = False
-    if not save_successful and local_postgres_cursor and local_postgres_conn:
+    if not save_successful and postgres_cursor and postgres_conn:
         try:
             ensure_tables_exist()
-            local_postgres_cursor.execute(
+            postgres_cursor.execute(
                 "SELECT id FROM patients_table WHERE phone = %s AND tenant_id = %s", 
                 (patient_data.phone, tenant_id_to_use)
             )
-            if local_postgres_cursor.fetchone():
+            if postgres_cursor.fetchone():
                 return error_response("Patient with this phone number already exists for this tenant.", 400)
             
             insert_sql, params = _insert_patient_sql(patient_data, calculated_age, tenant_id_to_use)
-            local_postgres_cursor.execute(insert_sql, params)
-            result = local_postgres_cursor.fetchone()
+            postgres_cursor.execute(insert_sql, params)
+            result = postgres_cursor.fetchone()
             new_patient_id = result[0] if result else None
-            local_postgres_conn.commit()
-            print(f"Patient successfully saved to Local PostgreSQL with ID {new_patient_id}.")
+            postgres_conn.commit()
             save_successful = True
-        except Exception as e:
-            print(f"Local PostgreSQL save FAILED. Error: {str(e)}.")
+        except Exception:
+            pass
             try:
                 ensure_tables_exist()
-                local_postgres_cursor.execute(
+                postgres_cursor.execute(
                     "SELECT id FROM patients_table WHERE phone = %s AND tenant_id = %s", 
                     (patient_data.phone, tenant_id_to_use)
                 )
-                if not local_postgres_cursor.fetchone():
+                if not postgres_cursor.fetchone():
                     insert_sql, params = _insert_patient_sql(patient_data, calculated_age, tenant_id_to_use)
-                    local_postgres_cursor.execute(insert_sql, params)
-                    result = local_postgres_cursor.fetchone()
+                    postgres_cursor.execute(insert_sql, params)
+                    result = postgres_cursor.fetchone()
                     new_patient_id = result[0] if result else None
-                    local_postgres_conn.commit()
-                    print(f"Patient successfully saved to Local PostgreSQL with ID {new_patient_id} (after table recreation).")
+                    postgres_conn.commit()
                     save_successful = True
-            except Exception as retry_e:
-                print(f"Retry after table recreation also FAILED. Error: {str(retry_e)}.")
+            except Exception:
+                pass
     if save_successful and new_patient_id:
-        sync_local_to_main()
         return {"message": f"Patient created successfully with ID {new_patient_id}."}
     else:
         raise HTTPException(
@@ -345,7 +335,7 @@ def create_patient(patient_data: PatientCreate):  # create a new patient for the
         )
 
 @router.put("/{patient_id}")
-def update_patient(patient_id: int, patient_data: PatientUpdate):  # update an existing patient for the current tenant - age is recalculated if dob is provided
+def update_patient(patient_id: int, patient_data: PatientUpdate):
     tenant_id = get_tenant_id()
     existing_patient_obj = get_patient_by_id(patient_id, tenant_id)
     if not existing_patient_obj:
@@ -414,7 +404,6 @@ def update_patient(patient_id: int, patient_data: PatientUpdate):  # update an e
         update_data["important_notes"] = patient_data.important_notes.lower() if patient_data.important_notes else None
     if patient_data.last_visit_date is not None:
         update_data["last_visit_date"] = patient_data.last_visit_date
-    update_data["synced_to_main"] = False
     if not update_data:
         return error_response("No fields provided for update", 400)
     postgres_updated = False
@@ -430,22 +419,18 @@ def update_patient(patient_id: int, patient_data: PatientUpdate):  # update an e
             
             db_session.commit()
             db_session.refresh(patient)
-            print(f"SQLAlchemy patient ID {patient_id} updated.")
             postgres_updated = True
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             db_session.rollback()
-            print(f"SQLAlchemy update FAILED. Error: {str(e)}.")
-    elif local_postgres_cursor and local_postgres_conn:
+    elif postgres_cursor and postgres_conn:
         try:
             set_clauses = []
             values = []
             for key, value in update_data.items():
-                if key != "synced_to_main":
                     set_clauses.append(f"{key}=%s")
                     values.append(value)
-            set_clauses.append("synced_to_main=FALSE")
             values.extend([patient_id, tenant_id])
             
             query = f"""
@@ -453,15 +438,13 @@ def update_patient(patient_id: int, patient_data: PatientUpdate):  # update an e
                 SET {', '.join(set_clauses)}
                 WHERE id=%s AND tenant_id=%s
             """
-            local_postgres_cursor.execute(query, values)
-            local_postgres_conn.commit()
-            if local_postgres_cursor.rowcount == 1:
-                print(f"Local PostgreSQL patient ID {patient_id} updated.")
+            postgres_cursor.execute(query, values)
+            postgres_conn.commit()
+            if postgres_cursor.rowcount == 1:
                 postgres_updated = True
-        except Exception as e:
-            print(f"Local PostgreSQL Update FAILED. Error: {str(e)}.")
+        except Exception:
+            pass
     if postgres_updated:
-        sync_local_to_main()
         return {"message": f"Patient with ID {patient_id} updated successfully."}
     else:
         raise HTTPException(
@@ -470,7 +453,7 @@ def update_patient(patient_id: int, patient_data: PatientUpdate):  # update an e
         )
 
 @router.delete("/{patient_id}")
-def delete_patient(patient_id: int):  # delete a patient by ID for the current tenant
+def delete_patient(patient_id: int):
     tenant_id = get_tenant_id()
     postgres_deleted = False
     if db_session:
@@ -481,34 +464,27 @@ def delete_patient(patient_id: int):  # delete a patient by ID for the current t
             if patient:
                 db_session.delete(patient)
                 db_session.commit()
-                print(f"Patient with ID {patient_id} successfully deleted using SQLAlchemy.")
                 postgres_deleted = True
-            else:
-                print(f"Patient with ID {patient_id} not found for deletion.")
-        except Exception as e:
+        except Exception:
             db_session.rollback()
-            print(f"Error deleting patient: {e}.")
-    elif local_postgres_cursor and local_postgres_conn:
+    elif postgres_cursor and postgres_conn:
         try:
-            local_postgres_cursor.execute(
+            postgres_cursor.execute(
                 "DELETE FROM patients_table WHERE id = %s AND tenant_id = %s", 
                 (patient_id, tenant_id)
             )
-            local_postgres_conn.commit()
-            if local_postgres_cursor.rowcount == 1:
-                print(f"Patient with ID {patient_id} successfully deleted from Local PostgreSQL.")
+            postgres_conn.commit()
+            if postgres_cursor.rowcount == 1:
                 postgres_deleted = True
-            else:
-                print(f"Patient with ID {patient_id} not found in Local PostgreSQL for deletion.")
-        except Exception as e:
-            print(f"Error deleting patient from Local PostgreSQL: {e}.")
+        except Exception:
+            pass
     if postgres_deleted:
         try:
             delete_patient_folder(patient_id, tenant_id)
-            print(f"Patient folder deleted for ID {patient_id}")
-        except Exception as e:
-            print(f"Warning: Could not delete patient folder for ID {patient_id}: {e}")
-        return {"message": f"Patient with ID {patient_id} deleted successfully from Local PostgreSQL."}
+            pass
+        except Exception:
+            pass
+        return {"message": f"Patient with ID {patient_id} deleted successfully from PostgreSQL."}
     else:
         raise HTTPException(
             status_code=404, 
@@ -524,9 +500,9 @@ async def upload_patient_photo(patient_id: int, file: UploadFile = File(...)):  
     
     # Validate patient exists
     try:
-        if local_postgres_cursor:
-            local_postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
-            if not local_postgres_cursor.fetchone():
+        if postgres_cursor:
+            postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
+            if not postgres_cursor.fetchone():
                 raise HTTPException(status_code=404, detail="Patient not found")
     except HTTPException:
         raise
@@ -580,7 +556,7 @@ async def upload_patient_document(patient_id: int, file: UploadFile = File(...),
             try:
                 doc = DocumentsModel(
                     patient_id=patient_id, tenant_id=tenant_id, filename=safe_filename,
-                    description=description, file_type=file_type, file_size=file_size, synced_to_main=False
+                    description=description, file_type=file_type, file_size=file_size
                 )
                 db_session.add(doc)
                 db_session.commit()
@@ -588,19 +564,19 @@ async def upload_patient_document(patient_id: int, file: UploadFile = File(...),
                 document_id = doc.id
             except Exception as e:
                 db_session.rollback()
-                print(f"Error saving document metadata (SQLAlchemy): {e}")
-        elif local_postgres_cursor and local_postgres_conn:
+                pass
+        elif postgres_cursor and postgres_conn:
             try:
-                local_postgres_cursor.execute("""
-                    INSERT INTO patient_documents (patient_id, tenant_id, filename, description, file_type, file_size, synced_to_main)
-                    VALUES (%s, %s, %s, %s, %s, %s, FALSE)
+                postgres_cursor.execute("""
+                    INSERT INTO patient_documents (patient_id, tenant_id, filename, description, file_type, file_size)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (patient_id, tenant_id, safe_filename, description, file_type, file_size))
-                result = local_postgres_cursor.fetchone()
+                result = postgres_cursor.fetchone()
                 document_id = result[0] if result else None
-                local_postgres_conn.commit()
+                postgres_conn.commit()
             except Exception as e:
-                print(f"Error saving document metadata: {e}")
+                pass
         return {
             "message": "Document uploaded successfully", "document_id": document_id, "patient_id": patient_id,
             "filename": safe_filename, "description": description, "file_type": file_type, "file_size": file_size
@@ -635,22 +611,22 @@ def list_patient_files(patient_id: int):  # list all files for a patient (photo,
                     "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None
                 } for doc in docs]
             except Exception as e:
-                print(f"Error fetching documents (SQLAlchemy): {e}")
-        elif local_postgres_cursor:
+                pass
+        elif postgres_cursor:
             try:
-                local_postgres_cursor.execute("""
+                postgres_cursor.execute("""
                     SELECT id, filename, description, file_type, file_size, uploaded_at
                     FROM patient_documents
                     WHERE patient_id = %s AND tenant_id = %s
                     ORDER BY uploaded_at DESC
                 """, (patient_id, tenant_id))
                 columns = ["id", "filename", "description", "file_type", "file_size", "uploaded_at"]
-                for record in local_postgres_cursor.fetchall():
+                for record in postgres_cursor.fetchall():
                     doc_dict = dict(zip(columns, record))
                     doc_dict["uploaded_at"] = doc_dict["uploaded_at"].isoformat() if doc_dict["uploaded_at"] else None
                     documents_list.append(doc_dict)
             except Exception as e:
-                print(f"Error fetching documents: {e}")
+                pass
         files_list["documents"] = documents_list
         presc_folder = patient_folder / "prescriptions"
         if presc_folder.exists():
@@ -661,7 +637,7 @@ def list_patient_files(patient_id: int):  # list all files for a patient (photo,
         return error_response(f"Error listing files: {str(e)}", 500)
 
 @router.get("/{patient_id}/download/{file_type}/{filename}")
-def download_patient_file(patient_id: int, file_type: str, filename: str):  # download a patient file. file_type: 'photo', 'documents', or 'prescriptions'
+def download_patient_file(patient_id: int, file_type: str, filename: str):
     tenant_id = get_tenant_id()
     if file_type not in ["photo", "documents", "prescriptions"]:
         raise HTTPException(status_code=400, detail="Invalid file type. Use: photo, documents, or prescriptions")
@@ -680,24 +656,24 @@ def download_patient_file(patient_id: int, file_type: str, filename: str):  # do
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 @router.get("/{patient_id}/billing/summary")
-def get_patient_billing_summary(patient_id: int):  # get billing summary for a patient (calculated from appointments only - billing module will handle amounts)
+def get_patient_billing_summary(patient_id: int):
     tenant_id = get_tenant_id()
     if not check_patient_exists(patient_id, tenant_id):
         return error_response(f"Patient with ID {patient_id} not found", 404)
     total_billed_from_appointments = 0.0
     appointments_with_charges = 0
-    if local_postgres_cursor:
+    if postgres_cursor:
         try:
-            local_postgres_cursor.execute(
+            postgres_cursor.execute(
                 "SELECT total_charge FROM appointments WHERE patient_id = %s AND tenant_id = %s AND status = 'Completed'",
                 (patient_id, tenant_id)
             )
-            for row in local_postgres_cursor.fetchall():
+            for row in postgres_cursor.fetchall():
                 if row[0]:
                     total_billed_from_appointments += float(row[0])
                     appointments_with_charges += 1
         except Exception as e:
-            print(f"Error fetching appointments: {e}")
+            pass
     last_payment_date = None
     invoice_count = 0
     
