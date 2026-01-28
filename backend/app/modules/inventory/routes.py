@@ -1,11 +1,15 @@
-from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
-from datetime import datetime
-from decimal import Decimal
+from fastapi import APIRouter, HTTPException, Query, Depends
+from typing import Optional, Any
+from datetime import datetime, date
 import uuid
 from app.core.config import settings
-from app.core.database import postgres_conn, postgres_cursor
-from app.modules.inventory.schemas import InventoryItemCreate, InventoryItemUpdate, InventoryItem
+from app.core.db_utils import get_db_session
+from app.core.models import InventoryItemModel
+from app.core.dependencies import get_current_active_user
+from app.common.utils import raise_not_found_error, raise_internal_server_error
+from sqlalchemy import and_
+from app.core.date_helpers import string_to_date
+from app.modules.inventory.schemas import InventoryItemCreate, InventoryItemUpdate
 
 router = APIRouter()
 
@@ -24,60 +28,52 @@ def convert_date_format(date_str: str) -> str:
     day, month, year = map(int, date_str.split('/'))
     return f"{year}-{month:02d}-{day:02d}"
 
-def inventory_item_to_dict(item_data) -> dict:
+def inventory_item_to_dict(item_data: Any) -> dict:
     if isinstance(item_data, dict):
         return item_data
+    # Handle ORM model object
     return {
-        "id": str(item_data["id"]) if item_data.get("id") else None,
-        "tenant_id": str(item_data["tenant_id"]) if item_data.get("tenant_id") else None,
-        "name": item_data["name"],
-        "category": item_data["category"],
-        "unit": item_data["unit"],
-        "current_stock": item_data["current_stock"],
-        "min_stock_level": item_data["min_stock_level"],
-        "unit_price": float(item_data["unit_price"]) if item_data.get("unit_price") else 0.0,
-        "expiry_date": item_data["expiry_date"].isoformat() if isinstance(item_data.get("expiry_date"), datetime.date) else str(item_data.get("expiry_date", "")),
-        "supplier_name": item_data["supplier_name"],
-        "supplier_phone": item_data["supplier_phone"],
-        "created_at": item_data["created_at"].isoformat() if isinstance(item_data.get("created_at"), datetime) else str(item_data.get("created_at", "")),
-        "updated_at": item_data["updated_at"].isoformat() if isinstance(item_data.get("updated_at"), datetime) else str(item_data.get("updated_at", ""))
+        "id": str(item_data.id) if item_data.id else None,
+        "tenant_id": str(item_data.tenant_id) if item_data.tenant_id else None,
+        "name": item_data.name,
+        "category": item_data.category,
+        "unit": item_data.unit,
+        "current_stock": item_data.current_stock,
+        "min_stock_level": item_data.min_stock_level,
+        "unit_price": float(item_data.unit_price) if item_data.unit_price else 0.0,
+        "expiry_date": item_data.expiry_date.isoformat() if item_data.expiry_date else None,
+        "supplier_name": item_data.supplier_name,
+        "supplier_phone": item_data.supplier_phone,
+        "created_at": item_data.created_at.isoformat() if item_data.created_at else None,
+        "updated_at": item_data.updated_at.isoformat() if item_data.updated_at else None
     }
 
 @router.get("/")
-def get_inventory_items(
+async def get_inventory_items(
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100),
     category: Optional[str] = None,
-    low_stock: Optional[bool] = None
+    low_stock: Optional[bool] = None,
+    current_user: dict = Depends(get_current_active_user)
 ):
     tenant_id_str = str(get_tenant_uuid())
     
-    items_list = []
-    if postgres_cursor:
-        try:
-            conditions = ["tenant_id = %s"]
-            params = [tenant_id_str]
+    try:
+        with get_db_session() as session:
+            query = session.query(InventoryItemModel).filter(
+                InventoryItemModel.tenant_id == tenant_id_str
+            )
             
             if category:
-                conditions.append("category = %s")
-                params.append(category.lower())
+                query = query.filter(InventoryItemModel.category == category.lower())
             
             if low_stock:
-                conditions.append("current_stock <= min_stock_level")
+                query = query.filter(InventoryItemModel.current_stock <= InventoryItemModel.min_stock_level)
             
-            query = f"""
-                SELECT id, tenant_id, name, category, unit, current_stock, min_stock_level,
-                       unit_price, expiry_date, supplier_name, supplier_phone,
-                       created_at, updated_at
-                FROM inventory_items
-                WHERE {' AND '.join(conditions)}
-                ORDER BY name
-            """
-            postgres_cursor.execute(query, params)
-            columns = [desc[0] for desc in postgres_cursor.description]
-            items_list = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching inventory items: {str(e)}")
+            items = query.order_by(InventoryItemModel.name).all()
+            items_list = [inventory_item_to_dict(item) for item in items]
+    except Exception as e:
+        raise_internal_server_error(f"Error fetching inventory items: {e}")
     
     total = len(items_list)
     total_pages = (total + limit - 1) // limit if total > 0 else 1
@@ -88,187 +84,197 @@ def get_inventory_items(
     }
 
 @router.get("/{item_id}")
-def get_inventory_item(item_id: str):
+async def get_inventory_item(item_id: str, current_user: dict = Depends(get_current_active_user)):
     tenant_id_str = str(get_tenant_uuid())
     
-    if postgres_cursor:
-        try:
-            postgres_cursor.execute("""
-                SELECT id, tenant_id, name, category, unit, current_stock, min_stock_level,
-                       unit_price, expiry_date, supplier_name, supplier_phone,
-                       created_at, updated_at
-                FROM inventory_items
-                WHERE id = %s AND tenant_id = %s
-            """, (item_id, tenant_id_str))
-            record = postgres_cursor.fetchone()
-            if record:
-                columns = [desc[0] for desc in postgres_cursor.description]
-                return dict(zip(columns, record))
-            else:
-                raise HTTPException(status_code=404, detail=f"Inventory item with ID {item_id} not found")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching inventory item: {str(e)}")
-    
-    raise HTTPException(status_code=500, detail="Database connection not available")
+    try:
+        item_id_int = int(item_id)
+        with get_db_session() as session:
+            item = session.query(InventoryItemModel).filter(
+                and_(
+                    InventoryItemModel.id == item_id_int,
+                    InventoryItemModel.tenant_id == tenant_id_str
+                )
+            ).first()
+            
+            if not item:
+                raise_not_found_error("Inventory item", item_id)
+            
+            return inventory_item_to_dict(item)
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid item ID format")
+    except Exception as e:
+        raise_internal_server_error(f"Error fetching inventory item: {e}")
 
 @router.post("/")
-def create_inventory_item(item_data: InventoryItemCreate):
+async def create_inventory_item(item_data: InventoryItemCreate, current_user: dict = Depends(get_current_active_user)):
     tenant_id_uuid = get_tenant_uuid()
     tenant_id_to_use = str(uuid.UUID(item_data.tenant_id)) if item_data.tenant_id else str(tenant_id_uuid)
     
-    if postgres_cursor and postgres_conn:
-        try:
-            expiry_date_pg = convert_date_format(item_data.expiry_date)
-            
-            postgres_cursor.execute("""
-                INSERT INTO inventory_items (
-                    tenant_id, name, category, unit, current_stock, min_stock_level,
-                    unit_price, expiry_date, supplier_name, supplier_phone
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                tenant_id_to_use, item_data.name.lower(), item_data.category.lower(),
-                item_data.unit.lower(), item_data.current_stock, item_data.min_stock_level,
-                item_data.unit_price, expiry_date_pg, item_data.supplier_name.lower(),
-                item_data.supplier_phone
-            ))
-            
-            result = postgres_cursor.fetchone()
-            item_id = str(result[0]) if result else None
-            postgres_conn.commit()
-            
-            if item_id:
-                return {"message": f"Inventory item created successfully", "item_id": item_id}
-            else:
-                raise HTTPException(status_code=500, detail="Failed to create inventory item")
-                
-        except Exception as e:
-            postgres_conn.rollback()
-            raise HTTPException(status_code=500, detail=f"Error creating inventory item: {str(e)}")
+    expiry_date_pg = string_to_date(item_data.expiry_date) if item_data.expiry_date else None
+    if not expiry_date_pg:
+        raise HTTPException(status_code=400, detail="Invalid expiry_date format. Use dd/mm/yyyy")
     
-    raise HTTPException(status_code=500, detail="Database connection not available")
+    try:
+        with get_db_session() as session:
+            new_item = InventoryItemModel(
+                tenant_id=tenant_id_to_use,
+                name=item_data.name.lower(),
+                category=item_data.category.lower(),
+                unit=item_data.unit.lower(),
+                current_stock=item_data.current_stock,
+                min_stock_level=item_data.min_stock_level,
+                unit_price=item_data.unit_price,
+                expiry_date=expiry_date_pg,
+                supplier_name=item_data.supplier_name.lower(),
+                supplier_phone=item_data.supplier_phone
+            )
+            session.add(new_item)
+            session.commit()
+            session.refresh(new_item)
+            
+            return {"message": f"Inventory item created successfully", "item_id": str(new_item.id)}
+    except Exception as e:
+        raise_internal_server_error(f"Error creating inventory item: {e}")
 
 @router.put("/{item_id}")
-def update_inventory_item(item_id: str, item_data: InventoryItemUpdate):
+async def update_inventory_item(item_id: str, item_data: InventoryItemUpdate, current_user: dict = Depends(get_current_active_user)):
     tenant_id_str = str(get_tenant_uuid())
     
-    if postgres_cursor and postgres_conn:
-        try:
-            # Check if item exists
-            postgres_cursor.execute(
-                "SELECT id FROM inventory_items WHERE id = %s AND tenant_id = %s",
-                (item_id, tenant_id_str)
-            )
-            if not postgres_cursor.fetchone():
-                raise HTTPException(status_code=404, detail=f"Inventory item with ID {item_id} not found")
+    try:
+        item_id_int = int(item_id)
+        with get_db_session() as session:
+            item = session.query(InventoryItemModel).filter(
+                and_(
+                    InventoryItemModel.id == item_id_int,
+                    InventoryItemModel.tenant_id == tenant_id_str
+                )
+            ).first()
             
-            update_data = {}
+            if not item:
+                raise_not_found_error("Inventory item", item_id)
+            
+            # Update fields
             if item_data.name is not None:
-                update_data["name"] = item_data.name.lower()
+                item.name = item_data.name.lower()
             if item_data.category is not None:
-                update_data["category"] = item_data.category.lower()
+                item.category = item_data.category.lower()
             if item_data.unit is not None:
-                update_data["unit"] = item_data.unit.lower()
+                item.unit = item_data.unit.lower()
             if item_data.current_stock is not None:
-                update_data["current_stock"] = item_data.current_stock
+                item.current_stock = item_data.current_stock
             if item_data.min_stock_level is not None:
-                update_data["min_stock_level"] = item_data.min_stock_level
+                item.min_stock_level = item_data.min_stock_level
             if item_data.unit_price is not None:
-                update_data["unit_price"] = item_data.unit_price
+                item.unit_price = item_data.unit_price
             if item_data.expiry_date is not None:
-                update_data["expiry_date"] = convert_date_format(item_data.expiry_date)
+                expiry_date_pg = string_to_date(item_data.expiry_date)
+                if expiry_date_pg:
+                    item.expiry_date = expiry_date_pg
             if item_data.supplier_name is not None:
-                update_data["supplier_name"] = item_data.supplier_name.lower()
+                item.supplier_name = item_data.supplier_name.lower()
             if item_data.supplier_phone is not None:
-                update_data["supplier_phone"] = item_data.supplier_phone
+                item.supplier_phone = item_data.supplier_phone
             
-            update_data["updated_at"] = datetime.now()
+            item.updated_at = datetime.now()
             
-            if not update_data:
-                raise HTTPException(status_code=400, detail="No fields provided for update")
+            session.commit()
+            session.refresh(item)
             
-            set_clauses = [f"{key} = %s" for key in update_data.keys()]
-            values = [update_data[key] for key in update_data.keys()]
-            values.append(item_id)
-            values.append(item_id)
-            values.append(tenant_id_str)
-            
-            query = f"UPDATE inventory_items SET {', '.join(set_clauses)} WHERE id = %s AND tenant_id = %s"
-            postgres_cursor.execute(query, values)
-            postgres_conn.commit()
             return {"message": f"Inventory item with ID {item_id} updated successfully"}
-            
-        except HTTPException:
-            raise
-        except Exception as e:
-            postgres_conn.rollback()
-            raise HTTPException(status_code=500, detail=f"Error updating inventory item: {str(e)}")
-    
-    raise HTTPException(status_code=500, detail="Database connection not available")
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid item ID format")
+    except Exception as e:
+        raise_internal_server_error(f"Error updating inventory item: {e}")
 
 @router.delete("/{item_id}")
-def delete_inventory_item(item_id: str):
+async def delete_inventory_item(item_id: str, current_user: dict = Depends(get_current_active_user)):
     tenant_id_str = str(get_tenant_uuid())
     
-    if postgres_cursor and postgres_conn:
-        try:
-            postgres_cursor.execute(
-                "DELETE FROM inventory_items WHERE id = %s AND tenant_id = %s",
-                (item_id, tenant_id_str)
-            )
-            postgres_conn.commit()
+    try:
+        item_id_int = int(item_id)
+        with get_db_session() as session:
+            item = session.query(InventoryItemModel).filter(
+                and_(
+                    InventoryItemModel.id == item_id_int,
+                    InventoryItemModel.tenant_id == tenant_id_str
+                )
+            ).first()
             
-            if postgres_cursor.rowcount > 0:
-                return {"message": f"Inventory item with ID {item_id} deleted successfully"}
-            else:
-                raise HTTPException(status_code=404, detail=f"Inventory item with ID {item_id} not found")
-        except HTTPException:
-            raise
-        except Exception as e:
-            postgres_conn.rollback()
-            raise HTTPException(status_code=500, detail=f"Error deleting inventory item: {str(e)}")
-    
-    raise HTTPException(status_code=500, detail="Database connection not available")
+            if not item:
+                raise_not_found_error("Inventory item", item_id)
+            
+            session.delete(item)
+            session.commit()
+            
+            return {"message": f"Inventory item with ID {item_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid item ID format")
+    except Exception as e:
+        raise_internal_server_error(f"Error deleting inventory item: {e}")
 
 @router.get("/alerts/low-stock")
-def get_low_stock_alerts():
+async def get_low_stock_alerts(current_user: dict = Depends(get_current_active_user)):
     tenant_id_str = str(get_tenant_uuid())
     
-    if postgres_cursor:
-        try:
-            postgres_cursor.execute("""
-                SELECT id, name, category, current_stock, min_stock_level, unit
-                FROM inventory_items
-                WHERE tenant_id = %s AND current_stock <= min_stock_level
-                ORDER BY (current_stock - min_stock_level) ASC
-            """, (tenant_id_str,))
-            columns = [desc[0] for desc in postgres_cursor.description]
-            alerts = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
+    try:
+        with get_db_session() as session:
+            items = session.query(InventoryItemModel).filter(
+                and_(
+                    InventoryItemModel.tenant_id == tenant_id_str,
+                    InventoryItemModel.current_stock <= InventoryItemModel.min_stock_level
+                )
+            ).order_by((InventoryItemModel.current_stock - InventoryItemModel.min_stock_level).asc()).all()
+            
+            alerts = [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "category": item.category,
+                    "current_stock": item.current_stock,
+                    "min_stock_level": item.min_stock_level,
+                    "unit": item.unit
+                }
+                for item in items
+            ]
             return {"alerts": alerts, "count": len(alerts)}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching low stock alerts: {str(e)}")
-    
-    raise HTTPException(status_code=500, detail="Database connection not available")
+    except Exception as e:
+        raise_internal_server_error(f"Error fetching low stock alerts: {e}")
 
 @router.get("/alerts/expiring")
-def get_expiring_items(days: int = Query(30, ge=1, le=365)):
+async def get_expiring_items(days: int = Query(30, ge=1, le=365), current_user: dict = Depends(get_current_active_user)):
     tenant_id_str = str(get_tenant_uuid())
     
-    if postgres_cursor:
-        try:
-            postgres_cursor.execute("""
-                SELECT id, name, category, expiry_date, current_stock, unit
-                FROM inventory_items
-                WHERE tenant_id = %s AND expiry_date <= CURRENT_DATE + INTERVAL '%s days'
-                ORDER BY expiry_date ASC
-            """, (tenant_id_str, days))
-            columns = [desc[0] for desc in postgres_cursor.description]
-            alerts = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
+    try:
+        from datetime import timedelta
+        
+        cutoff_date = date.today() + timedelta(days=days)
+        
+        with get_db_session() as session:
+            items = session.query(InventoryItemModel).filter(
+                and_(
+                    InventoryItemModel.tenant_id == tenant_id_str,
+                    InventoryItemModel.expiry_date <= cutoff_date
+                )
+            ).order_by(InventoryItemModel.expiry_date.asc()).all()
+            
+            alerts = [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "category": item.category,
+                    "expiry_date": item.expiry_date.isoformat() if item.expiry_date else None,
+                    "current_stock": item.current_stock,
+                    "unit": item.unit
+                }
+                for item in items
+            ]
             return {"alerts": alerts, "count": len(alerts), "days_ahead": days}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching expiring items: {str(e)}")
-    
-    raise HTTPException(status_code=500, detail="Database connection not available")
+    except Exception as e:
+        raise_internal_server_error(f"Error fetching expiring items: {e}")

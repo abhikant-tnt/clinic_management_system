@@ -1,30 +1,44 @@
 """Authentication business logic"""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Optional
 import jwt
 import bcrypt
 from fastapi import HTTPException, status
 from app.core.config import settings
-from app.core.database import postgres_cursor, postgres_conn, db_session
+from app.core.database import db_session
+from app.core.db_utils import get_db_session
 from app.core.models import StaffModel
 from sqlalchemy import and_
+from app.common.utils import validate_column_names
 
 
 def hash_password(password: str) -> str:
-    """Hash a password using bcrypt (handles bcrypt's 72-byte limit)"""
+    """
+    Hash a password using bcrypt.
+    Raises ValueError if password exceeds bcrypt's 72-byte limit.
+    """
     password_bytes = password.encode('utf-8')
     if len(password_bytes) > 72:
-        password_bytes = password_bytes[:72]
+        raise ValueError(
+            "Password exceeds maximum length of 72 bytes. "
+            "Please use a shorter password."
+        )
     salt = bcrypt.gensalt(rounds=12)
     hashed = bcrypt.hashpw(password_bytes, salt)
     return hashed.decode('utf-8')
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash (handles bcrypt's 72-byte limit)"""
+    """
+    Verify a password against its hash.
+    Raises ValueError if password exceeds bcrypt's 72-byte limit.
+    """
     password_bytes = plain_password.encode('utf-8')
     if len(password_bytes) > 72:
-        password_bytes = password_bytes[:72]
+        raise ValueError(
+            "Password exceeds maximum length of 72 bytes. "
+            "Please use a shorter password."
+        )
     hashed_bytes = hashed_password.encode('utf-8')
     return bcrypt.checkpw(password_bytes, hashed_bytes)
 
@@ -33,9 +47,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """Create a JWT access token"""
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(UTC) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.now(UTC) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
@@ -58,24 +72,11 @@ def authenticate_user(username: str, password: str, tenant_id: str) -> Optional[
                     StaffModel.is_active == True
                 )
             ).first()
-        except Exception:
-            pass
+        except Exception as e:
+            # User lookup failed - return None (user doesn't exist)
+            print(f"Warning: Error looking up user: {e}")
     
-    if not user and postgres_cursor:
-        try:
-            postgres_cursor.execute("""
-                SELECT id, username, password_hash, user_type, firstname, lastname, 
-                       speciality, phone, is_active, last_login
-                FROM staff 
-                WHERE username = %s AND tenant_id = %s AND is_active = TRUE
-            """, (username, tenant_id))
-            record = postgres_cursor.fetchone()
-            if record:
-                columns = ["id", "username", "password_hash", "user_type", "firstname", 
-                          "lastname", "speciality", "phone", "is_active", "last_login"]
-                user = dict(zip(columns, record))
-        except Exception:
-            pass
+    return None
     
     if not user:
         return None
@@ -100,35 +101,49 @@ def authenticate_user(username: str, password: str, tenant_id: str) -> Optional[
     if not password_hash or not verify_password(password, password_hash):
         return None
     
+    # Update last login
     try:
-        if db_session and hasattr(user, 'id'):
-            user.last_login = datetime.utcnow()
-            db_session.commit()
-        elif postgres_cursor and postgres_conn:
-            postgres_cursor.execute("""
-                UPDATE staff SET last_login = %s WHERE id = %s AND tenant_id = %s
-            """, (datetime.utcnow(), user_dict["id"], tenant_id))
-            postgres_conn.commit()
-    except Exception:
-        pass
+        if hasattr(user, 'id'):
+            # User is a model object
+            with get_db_session() as session:
+                db_user = session.query(StaffModel).filter(
+                    and_(StaffModel.id == user.id, StaffModel.tenant_id == tenant_id)
+                ).first()
+                if db_user:
+                    db_user.last_login = datetime.now(UTC)
+                    session.commit()
+        else:
+            # User is a dict
+            with get_db_session() as session:
+                db_user = session.query(StaffModel).filter(
+                    and_(StaffModel.id == user_dict["id"], StaffModel.tenant_id == tenant_id)
+                ).first()
+                if db_user:
+                    db_user.last_login = datetime.now(UTC)
+                    session.commit()
+    except Exception as e:
+        # Last login update failed - log but don't fail the request
+        print(f"Warning: Failed to update last login: {e}")
     
     return user_dict
 
 
 def get_user_by_username(username: str, tenant_id: str) -> Optional[dict]:
     """Get user by username"""
-    if db_session:
-        try:
-            user = db_session.query(StaffModel).filter(
+    try:
+        with get_db_session() as session:
+            user = session.query(StaffModel).filter(
                 and_(
                     StaffModel.username == username,
-                    StaffModel.tenant_id == tenant_id
+                    StaffModel.tenant_id == tenant_id,
+                    StaffModel.is_active == True
                 )
             ).first()
             if user:
                 return {
                     "id": user.id,
                     "username": user.username,
+                    "password_hash": user.password_hash,
                     "user_type": user.user_type,
                     "firstname": user.firstname,
                     "lastname": user.lastname,
@@ -137,24 +152,9 @@ def get_user_by_username(username: str, tenant_id: str) -> Optional[dict]:
                     "is_active": user.is_active,
                     "last_login": user.last_login
                 }
-        except Exception:
-            pass
-    
-    if postgres_cursor:
-        try:
-            postgres_cursor.execute("""
-                SELECT id, username, password_hash, user_type, firstname, lastname,
-                       speciality, phone, is_active, last_login
-                FROM staff 
-                WHERE username = %s AND tenant_id = %s
-            """, (username, tenant_id))
-            record = postgres_cursor.fetchone()
-            if record:
-                columns = ["id", "username", "password_hash", "user_type", "firstname",
-                          "lastname", "speciality", "phone", "is_active", "last_login"]
-                return dict(zip(columns, record))
-        except Exception:
-            pass
+    except Exception as e:
+        # User lookup failed - return None (user doesn't exist)
+        print(f"Warning: Error looking up user: {e}")
     
     return None
 
@@ -176,31 +176,17 @@ def create_user_with_credentials(
     if get_user_by_username(username, tenant_id):
         return None
     
-    if db_session:
-        try:
-            existing = db_session.query(StaffModel).filter(
+    password_hash = hash_password(password)
+    
+    try:
+        with get_db_session() as session:
+            # Check if phone already exists
+            existing = session.query(StaffModel).filter(
                 and_(StaffModel.phone == phone, StaffModel.tenant_id == tenant_id)
             ).first()
             if existing:
                 return None
-        except Exception:
-            pass
-    
-    if postgres_cursor:
-        try:
-            postgres_cursor.execute(
-                "SELECT id FROM staff WHERE phone = %s AND tenant_id = %s",
-                (phone, tenant_id)
-            )
-            if postgres_cursor.fetchone():
-                return None
-        except Exception:
-            pass
-    
-    password_hash = hash_password(password)
-    
-    if db_session:
-        try:
+            
             new_staff = StaffModel(
                 tenant_id=tenant_id,
                 firstname=firstname.lower(),
@@ -212,40 +198,13 @@ def create_user_with_credentials(
                 user_type=user_type,
                 is_active=True
             )
-            db_session.add(new_staff)
-            db_session.commit()
-            db_session.refresh(new_staff)
+            session.add(new_staff)
+            session.commit()
+            session.refresh(new_staff)
             return new_staff.id
-        except Exception as e:
-            db_session.rollback()
-            return None
-    
-    if postgres_cursor and postgres_conn:
-        try:
-            postgres_cursor.execute("""
-                INSERT INTO staff (tenant_id, firstname, lastname, speciality, phone, 
-                                 username, password_hash, user_type, is_active)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (
-                tenant_id,
-                firstname.lower(),
-                lastname.lower(),
-                speciality.lower() if speciality else None,
-                phone,
-                username,
-                password_hash,
-                user_type,
-                True
-            ))
-            result = postgres_cursor.fetchone()
-            postgres_conn.commit()
-            return result[0] if result else None
-        except Exception as e:
-            postgres_conn.rollback()
-            return None
-    
-    return None
+    except Exception as e:
+        print(f"Error creating user: {e}")
+        return None
 
 
 def get_user_by_id(user_id: int, tenant_id: str) -> Optional[dict]:
@@ -271,26 +230,9 @@ def get_user_by_id(user_id: int, tenant_id: str) -> Optional[dict]:
                     "is_active": user.is_active,
                     "last_login": user.last_login
                 }
-        except Exception:
-            pass
-    
-    if postgres_cursor:
-        try:
-            postgres_cursor.execute("""
-                SELECT id, username, password_hash, user_type, firstname, lastname,
-                       speciality, phone, is_active, last_login
-                FROM staff 
-                WHERE id = %s AND tenant_id = %s
-            """, (user_id, tenant_id))
-            record = postgres_cursor.fetchone()
-            if record:
-                columns = ["id", "username", "password_hash", "user_type", "firstname",
-                          "lastname", "speciality", "phone", "is_active", "last_login"]
-                return dict(zip(columns, record))
-        except Exception:
-            pass
-    
-    return None
+        except Exception as e:
+            # User lookup failed - return None (user doesn't exist)
+            print(f"Warning: Error looking up user: {e}")
 
 
 def update_user_account(
@@ -332,41 +274,23 @@ def update_user_account(
         return False
     
     # Update in database
-    if db_session:
-        try:
-            staff = db_session.query(StaffModel).filter(
+    try:
+        with get_db_session() as session:
+            staff = session.query(StaffModel).filter(
                 and_(StaffModel.id == user_id, StaffModel.tenant_id == tenant_id)
             ).first()
             if not staff:
                 return False
+            
             for key, value in update_data.items():
                 setattr(staff, key, value)
-            db_session.commit()
-            db_session.refresh(staff)
-            return True
-        except Exception:
-            db_session.rollback()
-            return False
-    
-    if postgres_cursor and postgres_conn:
-        try:
-            set_clauses = []
-            values = []
-            for key, value in update_data.items():
-                set_clauses.append(f"{key} = %s")
-                values.append(value)
-            values.append(user_id)
-            values.append(tenant_id)
             
-            query = f"UPDATE staff SET {', '.join(set_clauses)} WHERE id = %s AND tenant_id = %s"
-            postgres_cursor.execute(query, values)
-            postgres_conn.commit()
-            return postgres_cursor.rowcount > 0
-        except Exception:
-            postgres_conn.rollback()
-            return False
-    
-    return False
+            session.commit()
+            session.refresh(staff)
+            return True
+    except Exception as e:
+        print(f"Error updating user account: {e}")
+        return False
 
 
 def delete_user_account(user_id: int, tenant_id: str, password: str) -> bool:
@@ -390,29 +314,17 @@ def delete_user_account(user_id: int, tenant_id: str, password: str) -> bool:
         return False
     
     # Delete from database
-    if db_session:
-        try:
-            staff = db_session.query(StaffModel).filter(
+    try:
+        with get_db_session() as session:
+            staff = session.query(StaffModel).filter(
                 and_(StaffModel.id == user_id, StaffModel.tenant_id == tenant_id)
             ).first()
-            if staff:
-                db_session.delete(staff)
-                db_session.commit()
-                return True
-        except Exception:
-            db_session.rollback()
-            return False
-    
-    if postgres_cursor and postgres_conn:
-        try:
-            postgres_cursor.execute(
-                "DELETE FROM staff WHERE id = %s AND tenant_id = %s",
-                (user_id, tenant_id)
-            )
-            postgres_conn.commit()
-            return postgres_cursor.rowcount > 0
-        except Exception:
-            postgres_conn.rollback()
-            return False
-    
-    return False
+            if not staff:
+                return False
+            
+            session.delete(staff)
+            session.commit()
+            return True
+    except Exception as e:
+        print(f"Error deleting user account: {e}")
+        return False

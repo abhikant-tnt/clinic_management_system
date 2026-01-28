@@ -1,15 +1,13 @@
 """Dependencies for API authentication and authorization"""
-from datetime import datetime
-from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 import jwt
 from app.core.config import settings
-from app.core.database import postgres_cursor, db_session
+from app.core.database import get_postgres_connection, postgres_connected
+from app.core.db_utils import get_db_session
 from app.core.models import StaffModel
 from sqlalchemy import and_
 
-# OAuth2 scheme for token extraction
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_PREFIX}/auth/login")
 
 
@@ -33,7 +31,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         username: str = payload.get("sub")
         user_id: int = payload.get("user_id")
-        user_type: str = payload.get("user_type")
         tenant_id: str = payload.get("tenant_id")
         
         if username is None or user_id is None:
@@ -42,50 +39,49 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     except jwt.InvalidTokenError:
         raise credentials_exception
     
-    # Verify user still exists and is active
     user = None
     current_tenant_id = get_tenant_id()
     
-    # Verify tenant_id matches
     if tenant_id != current_tenant_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid tenant"
         )
     
-    if db_session:
+    if not user:
         try:
-            user = db_session.query(StaffModel).filter(
-                and_(
-                    StaffModel.id == user_id,
-                    StaffModel.username == username,
-                    StaffModel.tenant_id == current_tenant_id,
-                    StaffModel.is_active == True
-                )
-            ).first()
-        except Exception:
-            pass
+            with get_db_session() as session:
+                user = session.query(StaffModel).filter(
+                    and_(
+                        StaffModel.id == user_id,
+                        StaffModel.username == username,
+                        StaffModel.tenant_id == current_tenant_id,
+                        StaffModel.is_active == True
+                    )
+                ).first()
+        except Exception as e:
+            print(f"Warning: Error looking up user in database: {e}")
     
-    if not user and postgres_cursor:
+    if not user and postgres_connected:
         try:
-            postgres_cursor.execute("""
-                SELECT id, username, user_type, firstname, lastname, 
-                       speciality, phone, is_active
-                FROM staff 
-                WHERE id = %s AND username = %s AND tenant_id = %s AND is_active = TRUE
-            """, (user_id, username, current_tenant_id))
-            record = postgres_cursor.fetchone()
-            if record:
-                columns = ["id", "username", "user_type", "firstname", 
-                          "lastname", "speciality", "phone", "is_active"]
-                user = dict(zip(columns, record))
+            with get_postgres_connection() as (_, cursor):
+                cursor.execute("""
+                    SELECT id, username, user_type, firstname, lastname, 
+                           speciality, phone, is_active
+                    FROM staff 
+                    WHERE id = %s AND username = %s AND tenant_id = %s AND is_active = TRUE
+                """, (user_id, username, current_tenant_id))
+                record = cursor.fetchone()
+                if record:
+                    columns = ["id", "username", "user_type", "firstname", 
+                              "lastname", "speciality", "phone", "is_active"]
+                    user = dict(zip(columns, record))
         except Exception:
             pass
     
     if not user:
         raise credentials_exception
     
-    # Convert SQLAlchemy model to dict if needed
     if hasattr(user, 'id'):
         return {
             "id": user.id,
@@ -116,11 +112,7 @@ async def get_current_active_user(current_user: dict = Depends(get_current_user)
 
 
 def require_user_type(*allowed_types: str):
-    """
-    Dependency factory to require specific user types.
-    Usage: require_doctor = require_user_type("doctor")
-    Then use: current_user = Depends(require_doctor)
-    """
+    """Dependency factory to require specific user types"""
     def user_type_checker(current_user: dict = Depends(get_current_active_user)) -> dict:
         user_type = current_user.get("user_type")
         if user_type not in allowed_types:
@@ -132,7 +124,6 @@ def require_user_type(*allowed_types: str):
     return user_type_checker
 
 
-# Convenience dependencies for common roles
 require_doctor = require_user_type("doctor")
 require_staff = require_user_type("staff")
 require_doctor_or_staff = require_user_type("doctor", "staff")
