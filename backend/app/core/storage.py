@@ -47,7 +47,8 @@ def delete_patient_folder(patient_id: int, tenant_id: Optional[str] = None) -> b
             shutil.rmtree(folder)
             return True
         return False
-    except Exception:
+    except Exception as e:
+        print(f"Error: Failed to ensure uploads directory: {e}")
         return False
 
 def ensure_uploads_directory():  # ensure base uploads directory exists, create .gitkeep if needed

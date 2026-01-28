@@ -8,7 +8,9 @@ from app.modules.billing.routes import router as billing_router
 from app.modules.auth.routes import router as auth_router
 from app.modules.settings.routes import router as settings_router
 from app.modules.inventory.routes import router as inventory_router
-from app.modules.staff.routes import router as staff_router
+from app.modules.users.routes import router as users_router
+from app.modules.asset_management.routes import router as asset_router
+from app.admin.platform.routes import router as platform_router
 
 api_router = APIRouter()
 
@@ -21,5 +23,6 @@ api_router.include_router(billing_router, prefix="/billing", tags=["billing"])
 api_router.include_router(auth_router, prefix="/auth", tags=["authentication"])
 api_router.include_router(settings_router, prefix="/settings", tags=["settings"])
 api_router.include_router(inventory_router, prefix="/inventory", tags=["inventory"])
-api_router.include_router(staff_router, prefix="/staff", tags=["staff"])
-
+api_router.include_router(users_router, prefix="/users", tags=["users"])
+api_router.include_router(asset_router, prefix="/assets", tags=["Asset Management"])
+api_router.include_router(platform_router, prefix="/platform", tags=["Platform Admin"])

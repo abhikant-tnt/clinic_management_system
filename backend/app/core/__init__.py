@@ -5,7 +5,7 @@ from app.core.database import (
     db_session
 )
 from app.core.db_session import SessionLocal, get_db
-from app.core.models import PatientModel, AppointmentsModel, DocumentsModel, StaffModel
+from app.core.models import PatientModel, AppointmentsModel, DocumentsModel, UserModel, RoomModel, MachineModel
 
 __all__ = [
     "settings",
@@ -17,7 +17,9 @@ __all__ = [
     "PatientModel",
     "AppointmentsModel",
     "DocumentsModel",
-    "StaffModel"
+    "UserModel",
+    "RoomModel",
+    "MachineModel"
 ]
 
 

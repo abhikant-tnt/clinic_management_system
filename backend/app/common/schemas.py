@@ -1,7 +1,7 @@
 """
 Shared Pydantic schemas used across multiple modules
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 
@@ -18,11 +18,10 @@ class ErrorResponse(BaseModel):
 
 class PaginationParams(BaseModel):
     """Pagination parameters"""
+    model_config = ConfigDict(from_attributes=True)
+    
     page: int = 1
     page_size: int = 10
-    
-    class Config:
-        from_attributes = True
 
 class TimestampMixin(BaseModel):
     """Mixin for timestamps"""

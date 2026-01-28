@@ -2,7 +2,6 @@
 Application configuration settings
 """
 import os
-from typing import Optional
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -14,7 +13,9 @@ ENV_FILE = BASE_DIR / ".env"
 if not ENV_FILE.exists():
     print("Creating .env file with default settings...")
     print("⚠️  IMPORTANT: Please set your PostgreSQL passwords in the .env file!")
-    env_content = """# ============================================================
+    import secrets
+    generated_secret_key = secrets.token_urlsafe(32)
+    env_content = f"""# ============================================================
 # PostgreSQL Database Server
 # ============================================================
 # Replace 'your-main-server.com' with your actual server IP/domain
@@ -30,14 +31,17 @@ MAIN_POSTGRES_DB=clinic_db_main
 # Change this to your unique clinic identifier!
 TENANT_ID=clinic_001
 
-# Security Settings (optional)
-SECRET_KEY=
+# Security Settings (REQUIRED - auto-generated)
+# This key was automatically generated. Keep it secure!
+SECRET_KEY={generated_secret_key}
 
 # DATABASE_URL (auto-generated from PostgreSQL settings above)
 # DATABASE_URL will be constructed automatically from the settings above
 """
     ENV_FILE.write_text(env_content, encoding='utf-8')
-    print(f".env file created at {ENV_FILE}\n⚠️  Please edit .env and set the correct MAIN_POSTGRES_PASSWORD and TENANT_ID (unique per clinic)!")
+    print(f".env file created at {ENV_FILE}")
+    print("⚠️  Please edit .env and set the correct MAIN_POSTGRES_PASSWORD and TENANT_ID (unique per clinic)!")
+    print(f"✅ SECRET_KEY has been auto-generated and saved to .env file")
 # .env file exists, no action needed
 
 # Load environment variables from .env file
@@ -73,17 +77,44 @@ class Settings:
         return f"postgresql://{self.MAIN_POSTGRES_USER}:{self.MAIN_POSTGRES_PASSWORD}@{self.MAIN_POSTGRES_HOST}:{self.MAIN_POSTGRES_PORT}/{self.MAIN_POSTGRES_DB}"
     
     # Security Settings
-    SECRET_KEY: str = os.getenv("SECRET_KEY") or "your-secret-key-change-in-production-min-32-chars"
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "")
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 720  # 12 hours
     
-    # CORS Settings
-    CORS_ORIGINS: list = ["*"]  # Configure for production
+    # CORS Settings - restrict in production
+    CORS_ORIGINS: list = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",") if os.getenv("CORS_ORIGINS") else ["http://localhost:3000", "http://localhost:8000"]
     
     class Config:
         case_sensitive = True
 
 settings = Settings()
+
+# Validate and auto-generate SECRET_KEY if missing
+if not settings.SECRET_KEY or settings.SECRET_KEY == "" or len(settings.SECRET_KEY) < 32:
+    import secrets
+    generated_key = secrets.token_urlsafe(32)
+    # Update environment variable
+    os.environ["SECRET_KEY"] = generated_key
+    settings.SECRET_KEY = generated_key
+    
+    # Try to update .env file if it exists
+    if ENV_FILE.exists():
+        try:
+            env_content = ENV_FILE.read_text(encoding='utf-8')
+            # Update SECRET_KEY in .env file
+            if "SECRET_KEY=" in env_content:
+                import re
+                env_content = re.sub(r'SECRET_KEY=.*', f'SECRET_KEY={generated_key}', env_content)
+            else:
+                env_content += f"\nSECRET_KEY={generated_key}\n"
+            ENV_FILE.write_text(env_content, encoding='utf-8')
+            print("✅ Auto-generated SECRET_KEY and saved to .env file")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not update .env file: {e}")
+            print(f"⚠️  Please manually add this SECRET_KEY to your .env file: {generated_key}")
+    else:
+        print("⚠️  Warning: .env file not found. Using generated SECRET_KEY for this session only.")
+        print(f"⚠️  Please create .env file and add: SECRET_KEY={generated_key}")
 
 if settings.TENANT_ID == "clinic_001":
     print("WARNING: Using default TENANT_ID 'clinic_001'. Please set a unique TENANT_ID in your .env file.")

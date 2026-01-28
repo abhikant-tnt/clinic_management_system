@@ -5,7 +5,8 @@ import jwt
 from app.core.config import settings
 from app.core.database import get_postgres_connection, postgres_connected
 from app.core.db_utils import get_db_session
-from app.core.models import StaffModel
+from app.core.models import UserModel
+from app.core.permissions import USER_TYPE_PLATFORM_ADMIN, is_platform_admin
 from sqlalchemy import and_
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_PREFIX}/auth/login")
@@ -32,6 +33,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         username: str = payload.get("sub")
         user_id: int = payload.get("user_id")
         tenant_id: str = payload.get("tenant_id")
+        user_type: str = payload.get("user_type")
         
         if username is None or user_id is None:
             raise credentials_exception
@@ -42,39 +44,65 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     user = None
     current_tenant_id = get_tenant_id()
     
-    if tenant_id != current_tenant_id:
+    # Platform admin can access any tenant, regular users must match tenant
+    is_platform_admin_user = is_platform_admin(user_type) if user_type else False
+    
+    if not is_platform_admin_user and tenant_id != current_tenant_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid tenant"
         )
     
+    # For platform admin, use tenant_id from token (can be any tenant)
+    # For regular users, use current_tenant_id
+    lookup_tenant_id = tenant_id if is_platform_admin_user else current_tenant_id
+    
     if not user:
         try:
             with get_db_session() as session:
-                user = session.query(StaffModel).filter(
-                    and_(
-                        StaffModel.id == user_id,
-                        StaffModel.username == username,
-                        StaffModel.tenant_id == current_tenant_id,
-                        StaffModel.is_active == True
-                    )
-                ).first()
+                # Platform admin lookup: match user_id and username, allow any tenant
+                # Regular user lookup: match user_id, username, and tenant_id
+                if is_platform_admin_user:
+                    user = session.query(UserModel).filter(
+                        and_(
+                            UserModel.id == user_id,
+                            UserModel.username == username,
+                            UserModel.is_active == True
+                        )
+                    ).first()
+                else:
+                    user = session.query(UserModel).filter(
+                        and_(
+                            UserModel.id == user_id,
+                            UserModel.username == username,
+                            UserModel.tenant_id == lookup_tenant_id,
+                            UserModel.is_active == True
+                        )
+                    ).first()
         except Exception as e:
             print(f"Warning: Error looking up user in database: {e}")
     
     if not user and postgres_connected:
         try:
             with get_postgres_connection() as (_, cursor):
-                cursor.execute("""
-                    SELECT id, username, user_type, firstname, lastname, 
-                           speciality, phone, is_active
-                    FROM staff 
-                    WHERE id = %s AND username = %s AND tenant_id = %s AND is_active = TRUE
-                """, (user_id, username, current_tenant_id))
+                if is_platform_admin_user:
+                    cursor.execute("""
+                        SELECT id, username, user_type, firstname, lastname, 
+                               speciality, phone, is_active, tenant_id
+                        FROM users 
+                        WHERE id = %s AND username = %s AND is_active = TRUE
+                    """, (user_id, username))
+                else:
+                    cursor.execute("""
+                        SELECT id, username, user_type, firstname, lastname, 
+                               speciality, phone, is_active, tenant_id
+                        FROM users 
+                        WHERE id = %s AND username = %s AND tenant_id = %s AND is_active = TRUE
+                    """, (user_id, username, lookup_tenant_id))
                 record = cursor.fetchone()
                 if record:
                     columns = ["id", "username", "user_type", "firstname", 
-                              "lastname", "speciality", "phone", "is_active"]
+                              "lastname", "speciality", "phone", "is_active", "tenant_id"]
                     user = dict(zip(columns, record))
         except Exception:
             pass
@@ -83,6 +111,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         raise credentials_exception
     
     if hasattr(user, 'id'):
+        # Get tenant_id from user object or use from token/current tenant
+        user_tenant_id = getattr(user, 'tenant_id', None) or (tenant_id if is_platform_admin_user else current_tenant_id)
         return {
             "id": user.id,
             "username": user.username,
@@ -92,10 +122,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
             "speciality": user.speciality,
             "phone": user.phone,
             "is_active": user.is_active,
-            "tenant_id": current_tenant_id
+            "tenant_id": user_tenant_id,
+            "is_platform_admin": is_platform_admin_user
         }
     
-    user["tenant_id"] = current_tenant_id
+    # For dict-based user (from raw SQL)
+    user_tenant_id = user.get("tenant_id") or (tenant_id if is_platform_admin_user else current_tenant_id)
+    user["tenant_id"] = user_tenant_id
+    user["is_platform_admin"] = is_platform_admin_user
     return user
 
 
@@ -124,7 +158,15 @@ def require_user_type(*allowed_types: str):
     return user_type_checker
 
 
-require_doctor = require_user_type("doctor")
-require_staff = require_user_type("staff")
-require_doctor_or_staff = require_user_type("doctor", "staff")
+# Import permission dependencies from permissions module
+from app.core.permissions import (
+    require_platform_admin,
+    require_owner,
+    require_doctor,
+    require_receptionist,
+    require_doctor_or_receptionist,
+    require_owner_or_doctor,
+    require_owner_or_receptionist,
+    require_platform_admin_or_owner
+)
 

@@ -5,6 +5,7 @@ from app.modules.auth.schemas import UserLogin, Token, UserResponse, UserRegiste
 from app.modules.auth.services import authenticate_user, create_access_token, create_user_with_credentials, update_user_account, delete_user_account
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user
+from app.core.permissions import USER_TYPE_PLATFORM_ADMIN, is_platform_admin
 
 router = APIRouter()
 
@@ -37,13 +38,20 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             detail="User account is inactive"
         )
     
+    # For platform admin, use their actual tenant_id from user record
+    # For regular users, use the current tenant_id
+    token_tenant_id = user.get("tenant_id", tenant_id)
+    if is_platform_admin(user.get("user_type")):
+        # Platform admin token includes their actual tenant_id but can access any tenant
+        token_tenant_id = user.get("tenant_id", tenant_id)
+    
     access_token_expires = None
     access_token = create_access_token(
         data={
             "sub": user["username"],
             "user_id": user["id"],
             "user_type": user["user_type"],
-            "tenant_id": tenant_id
+            "tenant_id": token_tenant_id
         },
         expires_delta=access_token_expires
     )
@@ -234,11 +242,11 @@ async def delete_current_user(
             detail="User ID not found in token"
         )
     
-    # Prevent deleting admin
-    if user_type == "admin":
+    # Prevent deleting owner or platform admin
+    if user_type == "owner" or user_type == USER_TYPE_PLATFORM_ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot delete admin account"
+            detail="Cannot delete owner or platform admin account"
         )
     
     success = delete_user_account(

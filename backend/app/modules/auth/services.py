@@ -3,13 +3,11 @@ from datetime import datetime, timedelta, UTC
 from typing import Optional
 import jwt
 import bcrypt
-from fastapi import HTTPException, status
 from app.core.config import settings
-from app.core.database import db_session
 from app.core.db_utils import get_db_session
-from app.core.models import StaffModel
+from app.core.models import UserModel
+from app.core.permissions import USER_TYPE_PLATFORM_ADMIN, is_platform_admin
 from sqlalchemy import and_
-from app.common.utils import validate_column_names
 
 
 def hash_password(password: str) -> str:
@@ -59,24 +57,37 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 def authenticate_user(username: str, password: str, tenant_id: str) -> Optional[dict]:
     """
     Authenticate a user by username and password.
+    Platform admins can authenticate with any tenant_id (cross-tenant access).
+    Regular users must match the provided tenant_id.
     Returns user dict if authentication succeeds, None otherwise.
     """
     user = None
     
-    if db_session:
-        try:
-            user = db_session.query(StaffModel).filter(
+    try:
+        with get_db_session() as session:
+            # First, try to find user (check if platform admin by looking without tenant restriction)
+            # Platform admin can login with any tenant_id
+            user = session.query(UserModel).filter(
                 and_(
-                    StaffModel.username == username,
-                    StaffModel.tenant_id == tenant_id,
-                    StaffModel.is_active == True
+                    UserModel.username == username,
+                    UserModel.is_active == True
                 )
             ).first()
-        except Exception as e:
-            # User lookup failed - return None (user doesn't exist)
-            print(f"Warning: Error looking up user: {e}")
-    
-    return None
+            
+            # If user found, check if they're platform admin or match tenant
+            if user:
+                if is_platform_admin(user.user_type):
+                    # Platform admin - allow login with any tenant_id
+                    pass
+                elif user.tenant_id != tenant_id:
+                    # Regular user - must match tenant_id
+                    return None
+            else:
+                return None
+    except Exception as e:
+        # User lookup failed - return None (user doesn't exist)
+        print(f"Warning: Error looking up user: {e}")
+        return None
     
     if not user:
         return None
@@ -106,8 +117,10 @@ def authenticate_user(username: str, password: str, tenant_id: str) -> Optional[
         if hasattr(user, 'id'):
             # User is a model object
             with get_db_session() as session:
-                db_user = session.query(StaffModel).filter(
-                    and_(StaffModel.id == user.id, StaffModel.tenant_id == tenant_id)
+                # For platform admin, use their actual tenant_id, not the login tenant_id
+                user_tenant_id = user.tenant_id if hasattr(user, 'tenant_id') else tenant_id
+                db_user = session.query(UserModel).filter(
+                    and_(UserModel.id == user.id, UserModel.tenant_id == user_tenant_id)
                 ).first()
                 if db_user:
                     db_user.last_login = datetime.now(UTC)
@@ -115,8 +128,9 @@ def authenticate_user(username: str, password: str, tenant_id: str) -> Optional[
         else:
             # User is a dict
             with get_db_session() as session:
-                db_user = session.query(StaffModel).filter(
-                    and_(StaffModel.id == user_dict["id"], StaffModel.tenant_id == tenant_id)
+                user_tenant_id = user_dict.get("tenant_id") or tenant_id
+                db_user = session.query(UserModel).filter(
+                    and_(UserModel.id == user_dict["id"], UserModel.tenant_id == user_tenant_id)
                 ).first()
                 if db_user:
                     db_user.last_login = datetime.now(UTC)
@@ -125,6 +139,12 @@ def authenticate_user(username: str, password: str, tenant_id: str) -> Optional[
         # Last login update failed - log but don't fail the request
         print(f"Warning: Failed to update last login: {e}")
     
+    # Add tenant_id to user_dict for platform admin (use their actual tenant_id)
+    if hasattr(user, 'tenant_id'):
+        user_dict["tenant_id"] = user.tenant_id
+    elif not user_dict.get("tenant_id"):
+        user_dict["tenant_id"] = tenant_id
+    
     return user_dict
 
 
@@ -132,11 +152,11 @@ def get_user_by_username(username: str, tenant_id: str) -> Optional[dict]:
     """Get user by username"""
     try:
         with get_db_session() as session:
-            user = session.query(StaffModel).filter(
+            user = session.query(UserModel).filter(
                 and_(
-                    StaffModel.username == username,
-                    StaffModel.tenant_id == tenant_id,
-                    StaffModel.is_active == True
+                    UserModel.username == username,
+                    UserModel.tenant_id == tenant_id,
+                    UserModel.is_active == True
                 )
             ).first()
             if user:
@@ -181,13 +201,13 @@ def create_user_with_credentials(
     try:
         with get_db_session() as session:
             # Check if phone already exists
-            existing = session.query(StaffModel).filter(
-                and_(StaffModel.phone == phone, StaffModel.tenant_id == tenant_id)
+            existing = session.query(UserModel).filter(
+                and_(UserModel.phone == phone, UserModel.tenant_id == tenant_id)
             ).first()
             if existing:
                 return None
             
-            new_staff = StaffModel(
+            new_staff = UserModel(
                 tenant_id=tenant_id,
                 firstname=firstname.lower(),
                 lastname=lastname.lower(),
@@ -209,12 +229,12 @@ def create_user_with_credentials(
 
 def get_user_by_id(user_id: int, tenant_id: str) -> Optional[dict]:
     """Get user by ID with password hash"""
-    if db_session:
-        try:
-            user = db_session.query(StaffModel).filter(
+    try:
+        with get_db_session() as session:
+            user = session.query(UserModel).filter(
                 and_(
-                    StaffModel.id == user_id,
-                    StaffModel.tenant_id == tenant_id
+                    UserModel.id == user_id,
+                    UserModel.tenant_id == tenant_id
                 )
             ).first()
             if user:
@@ -230,9 +250,9 @@ def get_user_by_id(user_id: int, tenant_id: str) -> Optional[dict]:
                     "is_active": user.is_active,
                     "last_login": user.last_login
                 }
-        except Exception as e:
-            # User lookup failed - return None (user doesn't exist)
-            print(f"Warning: Error looking up user: {e}")
+    except Exception as e:
+        # User lookup failed - return None (user doesn't exist)
+        print(f"Warning: Error looking up user: {e}")
 
 
 def update_user_account(
@@ -276,17 +296,17 @@ def update_user_account(
     # Update in database
     try:
         with get_db_session() as session:
-            staff = session.query(StaffModel).filter(
-                and_(StaffModel.id == user_id, StaffModel.tenant_id == tenant_id)
+            user = session.query(UserModel).filter(
+                and_(UserModel.id == user_id, UserModel.tenant_id == tenant_id)
             ).first()
-            if not staff:
+            if not user:
                 return False
             
             for key, value in update_data.items():
-                setattr(staff, key, value)
+                setattr(user, key, value)
             
             session.commit()
-            session.refresh(staff)
+            session.refresh(user)
             return True
     except Exception as e:
         print(f"Error updating user account: {e}")
@@ -304,8 +324,9 @@ def delete_user_account(user_id: int, tenant_id: str, password: str) -> bool:
     if not user:
         return False
     
-    # Prevent deleting admin
-    if user.get("user_type") == "admin":
+    # Prevent deleting owner or platform admin
+    user_type = user.get("user_type")
+    if user_type == "owner" or user_type == USER_TYPE_PLATFORM_ADMIN:
         return False
     
     # Verify password
@@ -316,13 +337,13 @@ def delete_user_account(user_id: int, tenant_id: str, password: str) -> bool:
     # Delete from database
     try:
         with get_db_session() as session:
-            staff = session.query(StaffModel).filter(
-                and_(StaffModel.id == user_id, StaffModel.tenant_id == tenant_id)
+            user = session.query(UserModel).filter(
+                and_(UserModel.id == user_id, UserModel.tenant_id == tenant_id)
             ).first()
-            if not staff:
+            if not user:
                 return False
             
-            session.delete(staff)
+            session.delete(user)
             session.commit()
             return True
     except Exception as e:

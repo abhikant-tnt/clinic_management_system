@@ -1,15 +1,11 @@
 """Database connection and table setup for PostgreSQL"""
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
+from psycopg2.extensions import connection, cursor
 from app.core.config import settings
-from typing import Optional
+from typing import Optional, Tuple, Any, List
 
-from app.modules.billing.tables import (
-    BILLING_INVOICES_TABLE,
-    BILLING_ITEMS_TABLE,
-    BILLING_INVOICES_INDEXES,
-    BILLING_ITEMS_INDEXES
-)
+
 from app.modules.inventory.tables import (
     INVENTORY_ITEMS_TABLE,
     INVENTORY_ITEMS_INDEXES
@@ -18,7 +14,7 @@ from app.modules.inventory.tables import (
 postgres_pool: Optional[SimpleConnectionPool] = None
 postgres_connected = False
 
-def try_postgres_connection(host: str, port: str, user: str, database: str, password: Optional[str] = None):
+def try_postgres_connection(host: str, port: str, user: str, database: str, password: Optional[str] = None) -> Tuple[Optional[connection], Optional[str], Optional[List[str]]]:
     """Try PostgreSQL connection: trust auth first, then password auth"""
     params = {"host": host, "port": int(port) if isinstance(port, str) else port, "user": user, "database": database}
     errors = []
@@ -37,7 +33,7 @@ def try_postgres_connection(host: str, port: str, user: str, database: str, pass
     
     return None, None, errors
 
-def setup_postgres():
+def setup_postgres() -> None:
     """Setup PostgreSQL connection pool"""
     global postgres_pool, postgres_connected
     
@@ -57,7 +53,8 @@ def setup_postgres():
             cursor.close()
             default_conn.close()
         except Exception as e:
-            pass
+            # Database creation failed - log but don't raise (non-critical)
+            print(f"Warning: Could not create database: {e}")
     
     try:
         postgres_pool = SimpleConnectionPool(
@@ -72,11 +69,12 @@ def setup_postgres():
         test_conn.close()
         postgres_pool.putconn(test_conn)
         postgres_connected = True
-    except Exception:
+    except Exception as e:
         postgres_connected = False
         postgres_pool = None
+        print(f"Error: Failed to setup PostgreSQL connection pool: {e}")
 
-def create_table(cursor, table_sql: str, indexes: list, table_name: str):
+def create_table(cursor: Any, table_sql: str, indexes: List[str], table_name: str) -> Tuple[bool, bool]:
     """Create table and indexes. Returns (success, was_created)"""
     try:
         import re
@@ -100,22 +98,24 @@ def create_table(cursor, table_sql: str, indexes: list, table_name: str):
             for idx in indexes:
                 try:
                     cursor.execute(idx)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Index creation failed - log but continue
+                    print(f"Warning: Could not create index: {e}")
         
         return (True, not table_exists)
     except Exception as e:
         return (False, False)
 
-def add_columns_if_missing(cursor, columns: list):
+def add_columns_if_missing(cursor: Any, columns: List[str]) -> None:
     """Add columns if they don't exist"""
     for col_sql in columns:
         try:
             cursor.execute(col_sql)
-        except Exception:
-            pass
+        except Exception as e:
+            # Column addition failed - log but continue
+            print(f"Warning: Could not add column: {e}")
 
-def ensure_tables_exist():
+def ensure_tables_exist() -> bool:
     """Ensure all tables exist - useful after tables are dropped"""
     if not (postgres_connected and postgres_pool):
         return False
@@ -140,28 +140,56 @@ setup_postgres()
 PATIENTS_TABLE = """
     CREATE TABLE IF NOT EXISTS patients_table (
         id SERIAL PRIMARY KEY, tenant_id VARCHAR(100) NOT NULL,
-        title VARCHAR(10) NOT NULL, firstname VARCHAR(255) NOT NULL, lastname VARCHAR(255) NOT NULL,
-        dob VARCHAR(50) NOT NULL, age INTEGER NOT NULL,
-        gender VARCHAR(10) NOT NULL, phone VARCHAR(10) NOT NULL, email VARCHAR(255),
-        primary_doctor VARCHAR(255),
-        address1 TEXT NOT NULL, address2 TEXT, country VARCHAR(100),
-        city VARCHAR(100) NOT NULL, state VARCHAR(100) NOT NULL, pincode VARCHAR(10) NOT NULL,
-        emergency_contact_name VARCHAR(255) NOT NULL, emergency_contact_phone VARCHAR(10) NOT NULL,
-        referral_source VARCHAR(20) NOT NULL, referral_subcategory VARCHAR(255),
-        important_notes TEXT, patient_status VARCHAR(30) NOT NULL,
-        last_visit_date VARCHAR(50), registration_date VARCHAR(50) NOT NULL,
-        purpose VARCHAR(20),
+        firstname VARCHAR(255) NOT NULL, lastname VARCHAR(255) NOT NULL,
+        dob DATE NOT NULL, age INTEGER NOT NULL,
+        gender VARCHAR(10) NOT NULL, phone VARCHAR(10) NOT NULL, 
+        email VARCHAR(255) NOT NULL,
+        primary_doctor INTEGER,
+        blood_group VARCHAR(10),
+        status VARCHAR(30) NOT NULL,
+        vip BOOLEAN DEFAULT FALSE,
+        address1 TEXT NOT NULL, address2 TEXT, 
+        country VARCHAR(100), country2 VARCHAR(100),
+        city VARCHAR(100), city2 VARCHAR(100),
+        state VARCHAR(100), state2 VARCHAR(100),
+        pincode VARCHAR(10), pincode2 VARCHAR(10),
+        image VARCHAR(255) DEFAULT 'None',
+        emergency_contact_name VARCHAR(255),
+        emergency_contact_phone VARCHAR(10),
+        referral_source VARCHAR(20),
+        referral_subcategory VARCHAR(255),
+        patient_status VARCHAR(30),
+        registration_date DATE NOT NULL,
         past_medical_record TEXT DEFAULT 'None',
         dermatological_history TEXT DEFAULT 'None',
         medications TEXT DEFAULT 'None',
         surgeries TEXT DEFAULT 'None',
         hormonal_issues TEXT DEFAULT 'None',
+        allergies TEXT DEFAULT 'None',
+        lifestyle_assessment TEXT DEFAULT 'None',
+        billing_firstname VARCHAR(255),
+        billing_lastname VARCHAR(255),
+        billing_email VARCHAR(255),
+        billing_gstin VARCHAR(50),
+        billing_phone VARCHAR(10),
+        billing_address1 TEXT,
+        billing_address2 TEXT,
+        billing_country VARCHAR(100),
+        billing_country2 VARCHAR(100),
+        billing_state VARCHAR(100),
+        billing_state2 VARCHAR(100),
+        billing_city VARCHAR(100),
+        billing_city2 VARCHAR(100),
+        billing_pincode VARCHAR(10),
+        billing_pincode2 VARCHAR(10),
+        billing_name VARCHAR(255),
+        billing_address TEXT,
         UNIQUE(tenant_id, phone)
     )
 """
 
-STAFF_TABLE = """
-    CREATE TABLE IF NOT EXISTS staff (
+USERS_TABLE = """
+    CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY, tenant_id VARCHAR(100) NOT NULL,
         firstname VARCHAR(255) NOT NULL, lastname VARCHAR(255) NOT NULL,
         speciality VARCHAR(255), phone VARCHAR(10) NOT NULL,
@@ -184,42 +212,161 @@ PATIENT_DOCS_TABLE = """
 APPOINTMENTS_TABLE = """
     CREATE TABLE IF NOT EXISTS appointments (
         id SERIAL PRIMARY KEY, patient_id INTEGER NOT NULL, tenant_id VARCHAR(100) NOT NULL,
-        appointment_date VARCHAR(50) NOT NULL, appointment_time VARCHAR(10),
-        appointment_status VARCHAR(30) DEFAULT 'first time appointment', 
+        appointment_date DATE NOT NULL, appointment_time TIME,
+        status VARCHAR(30) DEFAULT 'Scheduled',
         doctor_id INTEGER NOT NULL, doctor_name VARCHAR(255),
-        appointment_type VARCHAR(50), notes TEXT, payment_pending BOOLEAN DEFAULT FALSE,
-        follow_up_date VARCHAR(50), diagnosis TEXT, treatment TEXT,
-        visit_charge DECIMAL(10, 2) DEFAULT 0, medication_charge DECIMAL(10, 2) DEFAULT 0,
-        total_charge DECIMAL(10, 2) DEFAULT 0, is_waived BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        purpose VARCHAR(50), payment VARCHAR(20) DEFAULT 'Pending',
+        interval VARCHAR(20), follow_up_date DATE,
         FOREIGN KEY (patient_id) REFERENCES patients_table(id) ON DELETE CASCADE,
-        FOREIGN KEY (doctor_id) REFERENCES staff(id) ON DELETE SET NULL
+        FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE SET NULL
     )
 """
 
-APPOINTMENT_CLINICAL_COLS = [
-    "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS doctor_id INTEGER",
-    "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS diagnosis TEXT",
-    "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS treatment TEXT",
-    "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS visit_charge DECIMAL(10, 2) DEFAULT 0",
-    "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS medication_charge DECIMAL(10, 2) DEFAULT 0",
-    "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS total_charge DECIMAL(10, 2) DEFAULT 0",
-    "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS is_waived BOOLEAN DEFAULT FALSE"
-]
+PRESCRIPTIONS_TABLE = """
+    CREATE TABLE IF NOT EXISTS prescriptions (
+        id SERIAL PRIMARY KEY,
+        tenant_id VARCHAR(100) NOT NULL,
+        appointment_id INTEGER NOT NULL,
+        bill_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        description TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (appointment_id) REFERENCES appointments(id) ON DELETE CASCADE
+    )
+"""
+
+PRESCRIPTION_ITEMS_TABLE = """
+    CREATE TABLE IF NOT EXISTS prescription_items (
+        id SERIAL PRIMARY KEY,
+        tenant_id VARCHAR(100) NOT NULL,
+        prescription_id INTEGER NOT NULL,
+        item_type VARCHAR(20) NOT NULL,
+        source VARCHAR(20) NOT NULL,
+        item_name TEXT NOT NULL,
+        quantity TEXT,
+        inventory_item_id INTEGER,
+        FOREIGN KEY (prescription_id) REFERENCES prescriptions(id) ON DELETE CASCADE,
+        FOREIGN KEY (inventory_item_id) REFERENCES inventory_items(id) ON DELETE SET NULL
+    )
+"""
+PROCEDURE_ROOMS_TABLE = """
+    CREATE TABLE IF NOT EXISTS procedure_rooms (
+        id SERIAL PRIMARY KEY,
+        tenant_id VARCHAR(100) NOT NULL,
+        room_number VARCHAR(100) NOT NULL,
+        room_type VARCHAR(100),
+        is_available BOOLEAN DEFAULT TRUE
+    )
+"""
+
+MACHINES_TABLE = """
+    CREATE TABLE IF NOT EXISTS machines (
+        id SERIAL PRIMARY KEY,
+        tenant_id VARCHAR(100) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        status VARCHAR(100),
+        room_id INTEGER REFERENCES procedure_rooms(id) ON DELETE SET NULL
+    )
+"""
+BILLING_INVOICES_TABLE = """
+    CREATE TABLE IF NOT EXISTS billing_invoices (
+        id SERIAL PRIMARY KEY,
+        tenant_id VARCHAR(100) NOT NULL,
+        invoice_number TEXT NOT NULL UNIQUE,
+        patient_id INTEGER NOT NULL,
+        appointment_id INTEGER NOT NULL,
+        doctor_id INTEGER NOT NULL,
+        issue_date DATE NOT NULL,
+        purpose TEXT NOT NULL,
+        total_amount NUMERIC(12,2) NOT NULL,
+        outstanding_amount NUMERIC(12,2) GENERATED ALWAYS AS ((total_amount + tax_amount + adjustments) - discount_amount - amount_paid) STORED,
+        status TEXT NOT NULL,
+        amount_paid NUMERIC(12,2) NOT NULL,
+        payment_mode VARCHAR(20),
+        discount_amount NUMERIC(12,2) NOT NULL,
+        coupon_code TEXT,
+        tax_amount NUMERIC(12,2) NOT NULL,
+        gst_percentage NUMERIC(5,2) NOT NULL,
+        adjustments NUMERIC(12,2) NOT NULL,
+        visit_charge NUMERIC(10,2) DEFAULT 0,
+        medication_charge NUMERIC(10,2) DEFAULT 0,
+        FOREIGN KEY (patient_id) REFERENCES patients_table(id) ON DELETE CASCADE,
+        FOREIGN KEY (appointment_id) REFERENCES appointments(id) ON DELETE CASCADE,
+        FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE SET NULL
+    )
+"""
+
+# Billing Items Table - Links to invoice via invoice_id (can access patient_id, doctor_id, purpose through invoice)
+BILLING_ITEMS_TABLE = """
+    CREATE TABLE IF NOT EXISTS billing_items (
+        id SERIAL PRIMARY KEY,
+        tenant_id VARCHAR(100) NOT NULL,
+        invoice_id INTEGER NOT NULL,
+        item_type TEXT NOT NULL,
+        description TEXT NOT NULL,
+        quantity INT NOT NULL,
+        unit_price NUMERIC(12,2) NOT NULL,
+        line_total NUMERIC(12,2) NOT NULL,
+        inventory_item_id INTEGER,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (invoice_id) REFERENCES billing_invoices(id) ON DELETE CASCADE,
+        FOREIGN KEY (inventory_item_id) REFERENCES inventory_items(id) ON DELETE SET NULL
+    )
+"""
+
+# Pharmacy Walk-In Bills Table - For walk-in customers (no patient/appointment required)
+PHARMACY_WALK_IN_BILLS_TABLE = """
+    CREATE TABLE IF NOT EXISTS pharmacy_walk_in_bills (
+        id SERIAL PRIMARY KEY,
+        tenant_id VARCHAR(100) NOT NULL,
+        invoice_number TEXT NOT NULL UNIQUE,
+        customer_name TEXT,
+        created_by INTEGER NOT NULL,
+        issue_date DATE NOT NULL,
+        total_amount NUMERIC(12,2) NOT NULL,
+        outstanding_amount NUMERIC(12,2) GENERATED ALWAYS AS ((total_amount + tax_amount + adjustments) - discount_amount - amount_paid) STORED,
+        status TEXT NOT NULL,
+        amount_paid NUMERIC(12,2) NOT NULL,
+        payment_mode VARCHAR(20),
+        discount_amount NUMERIC(12,2) NOT NULL,
+        coupon_code TEXT,
+        tax_amount NUMERIC(12,2) NOT NULL,
+        gst_percentage NUMERIC(5,2) NOT NULL,
+        adjustments NUMERIC(12,2) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+    )
+"""
+
+# Pharmacy Walk-In Items Table - Items in walk-in bills
+PHARMACY_WALK_IN_ITEMS_TABLE = """
+    CREATE TABLE IF NOT EXISTS pharmacy_walk_in_items (
+        id SERIAL PRIMARY KEY,
+        tenant_id VARCHAR(100) NOT NULL,
+        bill_id INTEGER NOT NULL,
+        item_type TEXT NOT NULL,
+        description TEXT NOT NULL,
+        quantity INT NOT NULL,
+        unit_price NUMERIC(12,2) NOT NULL,
+        line_total NUMERIC(12,2) NOT NULL,
+        inventory_item_id INTEGER,
+        expiry_date DATE,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (bill_id) REFERENCES pharmacy_walk_in_bills(id) ON DELETE CASCADE,
+        FOREIGN KEY (inventory_item_id) REFERENCES inventory_items(id) ON DELETE SET NULL
+    )
+"""
+
+# No migration columns needed - tables are created fresh with updated schema
+APPOINTMENT_MIGRATION_COLS = []
 
 TABLE_CONFIGS = [
-    ("staff", STAFF_TABLE, [
-        "CREATE INDEX IF NOT EXISTS idx_staff_tenant_id ON staff(tenant_id)",
-        "CREATE INDEX IF NOT EXISTS idx_staff_phone ON staff(phone)",
-        "CREATE INDEX IF NOT EXISTS idx_staff_username ON staff(username)",
-        "CREATE INDEX IF NOT EXISTS idx_staff_user_type ON staff(user_type)"
-    ], [
-        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS username VARCHAR(100)",
-        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)",
-        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS user_type VARCHAR(20) DEFAULT 'staff'",
-        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
-        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS last_login TIMESTAMP"
-    ]),
+    ("users", USERS_TABLE, [
+        "CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users(tenant_id)",
+        "CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone)",
+        "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
+        "CREATE INDEX IF NOT EXISTS idx_users_user_type ON users(user_type)"
+    ], None),
     ("patients_table", PATIENTS_TABLE, ["CREATE INDEX IF NOT EXISTS idx_patients_tenant_id ON patients_table(tenant_id)"], None),
     ("patient_documents", PATIENT_DOCS_TABLE, [
         "CREATE INDEX IF NOT EXISTS idx_patient_documents_patient_id ON patient_documents(patient_id)",
@@ -231,12 +378,48 @@ TABLE_CONFIGS = [
         "CREATE INDEX IF NOT EXISTS idx_appointments_tenant_id ON appointments(tenant_id)",
         "CREATE INDEX IF NOT EXISTS idx_appointments_doctor_id ON appointments(doctor_id)",
         "CREATE INDEX IF NOT EXISTS idx_appointments_appointment_date ON appointments(appointment_date)",
-        "CREATE INDEX IF NOT EXISTS idx_appointments_appointment_status ON appointments(appointment_status)",
+        "CREATE INDEX IF NOT EXISTS idx_appointments_status ON appointments(status)",
         "CREATE INDEX IF NOT EXISTS idx_appointments_doctor_name ON appointments(doctor_name)"
-    ], APPOINTMENT_CLINICAL_COLS),
+    ], APPOINTMENT_MIGRATION_COLS),
     ("inventory_items", INVENTORY_ITEMS_TABLE, INVENTORY_ITEMS_INDEXES, None),
-    ("billing_invoices", BILLING_INVOICES_TABLE, BILLING_INVOICES_INDEXES, None),
-    ("billing_items", BILLING_ITEMS_TABLE, BILLING_ITEMS_INDEXES, None)
+    ("billing_invoices", BILLING_INVOICES_TABLE, ["CREATE INDEX IF NOT EXISTS idx_billing_invoices_tenant_id ON billing_invoices(tenant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_billing_invoices_patient_id ON billing_invoices(patient_id)",
+    "CREATE INDEX IF NOT EXISTS idx_billing_invoices_appointment_id ON billing_invoices(appointment_id)",
+    "CREATE INDEX IF NOT EXISTS idx_billing_invoices_doctor_id ON billing_invoices(doctor_id)",
+    "CREATE INDEX IF NOT EXISTS idx_billing_invoices_invoice_number ON billing_invoices(invoice_number)"
+    ], None),
+    ("billing_items", BILLING_ITEMS_TABLE, ["CREATE INDEX IF NOT EXISTS idx_billing_items_tenant_id ON billing_items(tenant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_billing_items_invoice_id ON billing_items(invoice_id)",
+    "CREATE INDEX IF NOT EXISTS idx_billing_items_inventory_item_id ON billing_items(inventory_item_id)"
+    ], None),
+    ("prescriptions", PRESCRIPTIONS_TABLE, [
+        "CREATE INDEX IF NOT EXISTS idx_prescriptions_tenant_id ON prescriptions(tenant_id)",
+        "CREATE INDEX IF NOT EXISTS idx_prescriptions_appointment_id ON prescriptions(appointment_id)",
+        "CREATE INDEX IF NOT EXISTS idx_prescriptions_bill_date ON prescriptions(bill_date)"
+    ], None),
+    ("prescription_items", PRESCRIPTION_ITEMS_TABLE, [
+        "CREATE INDEX IF NOT EXISTS idx_prescription_items_tenant_id ON prescription_items(tenant_id)",
+        "CREATE INDEX IF NOT EXISTS idx_prescription_items_prescription_id ON prescription_items(prescription_id)",
+        "CREATE INDEX IF NOT EXISTS idx_prescription_items_inventory_item_id ON prescription_items(inventory_item_id)"
+    ], None),
+    ("procedure_rooms", PROCEDURE_ROOMS_TABLE, [
+        "CREATE INDEX IF NOT EXISTS idx_rooms_tenant_id ON procedure_rooms(tenant_id)"
+    ], None),
+    ("machines", MACHINES_TABLE, [
+        "CREATE INDEX IF NOT EXISTS idx_machines_tenant_id ON machines(tenant_id)"
+    ], None),
+    ("pharmacy_walk_in_bills", PHARMACY_WALK_IN_BILLS_TABLE, [
+        "CREATE INDEX IF NOT EXISTS idx_pharmacy_walk_in_bills_tenant_id ON pharmacy_walk_in_bills(tenant_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pharmacy_walk_in_bills_invoice_number ON pharmacy_walk_in_bills(invoice_number)",
+        "CREATE INDEX IF NOT EXISTS idx_pharmacy_walk_in_bills_created_by ON pharmacy_walk_in_bills(created_by)",
+        "CREATE INDEX IF NOT EXISTS idx_pharmacy_walk_in_bills_status ON pharmacy_walk_in_bills(status)",
+        "CREATE INDEX IF NOT EXISTS idx_pharmacy_walk_in_bills_issue_date ON pharmacy_walk_in_bills(issue_date)"
+    ], None),
+    ("pharmacy_walk_in_items", PHARMACY_WALK_IN_ITEMS_TABLE, [
+        "CREATE INDEX IF NOT EXISTS idx_pharmacy_walk_in_items_tenant_id ON pharmacy_walk_in_items(tenant_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pharmacy_walk_in_items_bill_id ON pharmacy_walk_in_items(bill_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pharmacy_walk_in_items_inventory_item_id ON pharmacy_walk_in_items(inventory_item_id)"
+    ], None)
 ]
 
 # Create tables in PostgreSQL
@@ -267,23 +450,6 @@ if postgres_connected and postgres_pool:
                             except Exception:
                                 pass
                     
-                    if tbl_name == "staff":
-                        try:
-                            cursor.execute("""
-                                SELECT COUNT(*) FROM pg_constraint 
-                                WHERE conrelid = 'staff'::regclass 
-                                AND conname = 'staff_tenant_id_username_key'
-                            """)
-                            constraint_exists = cursor.fetchone()[0] > 0
-                            if not constraint_exists:
-                                cursor.execute("""
-                                    ALTER TABLE staff 
-                                    ADD CONSTRAINT staff_tenant_id_username_key 
-                                    UNIQUE (tenant_id, username)
-                                """)
-                        except Exception:
-                            pass
-                    
                     if tbl_indexes:
                         for idx_sql in tbl_indexes:
                             try:
@@ -298,29 +464,67 @@ if postgres_connected and postgres_pool:
                 continue
         cursor.close()
         postgres_pool.putconn(conn)
-    except Exception:
-        pass
+    except Exception as e:
+        # Table setup failed - log error
+        print(f"Error: Failed to setup tables: {e}")
 
+# Removed global connection to prevent connection leak
+# Use get_postgres_connection() context manager instead
+
+def get_postgres_connection() -> Any:
+    """
+    Get a PostgreSQL connection from the pool.
+    Returns a context manager that automatically returns the connection.
+    Usage:
+        with get_postgres_connection() as (conn, cursor):
+            cursor.execute("SELECT ...")
+            conn.commit()
+    """
+    if not (postgres_connected and postgres_pool):
+        raise RuntimeError("PostgreSQL connection pool not available")
+    
+    class ConnectionContext:
+        def __init__(self):
+            self.conn = None
+            self.cursor = None
+        
+        def __enter__(self):
+            self.conn = postgres_pool.getconn()
+            self.conn.autocommit = False  # Use transactions properly
+            self.cursor = self.conn.cursor()
+            return (self.conn, self.cursor)
+        
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if self.cursor:
+                self.cursor.close()
+            if self.conn:
+                if exc_type:
+                    self.conn.rollback()
+                else:
+                    self.conn.commit()
+                postgres_pool.putconn(self.conn)
+            return False
+    
+    return ConnectionContext()
+
+# Legacy support - but should be migrated to get_postgres_connection()
+# These are kept as None for backward compatibility with old imports
 postgres_conn = None
 postgres_cursor = None
+db_session = None  # Deprecated: Use get_db_session() from db_utils instead
 
-if postgres_connected and postgres_pool:
-    try:
-        postgres_conn = postgres_pool.getconn()
-        postgres_conn.autocommit = True
-        postgres_cursor = postgres_conn.cursor()
-    except Exception as e:
-        pass
-
+# Initialize database tables on startup
 try:
     from app.core.db_session import SessionLocal, init_db
-    db_session = SessionLocal()
+    # Create a temporary session just to initialize tables
+    temp_session = SessionLocal()
     init_db()
-except Exception:
-    db_session = None
+    temp_session.close()
+except Exception as e:
+    print(f"Warning: Could not initialize database tables: {e}")
 
 try:
     from app.core.storage import ensure_uploads_directory
     ensure_uploads_directory()
-except Exception:
-    pass
+except Exception as e:
+    print(f"Warning: Could not ensure uploads directory: {e}")
