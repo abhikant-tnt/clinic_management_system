@@ -1,13 +1,14 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, status
 from typing import Any, Union, Optional
 from app.core.config import settings
 from app.core.db_utils import get_db_session
-from app.core.models import UserModel
+from app.modules.users.models import UserModel
+from app.modules.auth.services import hash_password
 from sqlalchemy import and_
-from app.modules.users.schemas import UserCreate, UserUpdate, User
+from app.modules.users.schemas import UserCreate, UserUpdate, User, ProfileUpdate
 from app.core.dependencies import get_current_active_user
 from app.core.db_helper import check_exists, get_by_id
-from app.core.permissions import require_users_full, USER_TYPE_OWNER
+from app.core.permissions import require_users_full, USER_TYPE_OWNER, USER_TYPE_PLATFORM_ADMIN
 
 router = APIRouter()
 
@@ -73,6 +74,57 @@ async def get_users(
         "pagination": {"total": total, "page": page, "limit": limit, "total_pages": total_pages, "has_next": page < total_pages, "has_prev": page > 1}
     }
 
+@router.put("/me", status_code=status.HTTP_200_OK)
+async def update_current_user_profile(
+    profile_data: ProfileUpdate,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """
+    Update current user's profile information (name, phone, speciality).
+    Requires active user authentication.
+    """
+    tenant_id = get_tenant_id()
+    user_id = current_user.get("id")
+    
+    update_data = {}
+    if profile_data.firstname is not None:
+        update_data["firstname"] = profile_data.firstname.lower()
+    if profile_data.lastname is not None:
+        update_data["lastname"] = profile_data.lastname.lower()
+    if profile_data.speciality is not None:
+        update_data["speciality"] = profile_data.speciality.lower()
+    if profile_data.phone is not None:
+        update_data["phone"] = profile_data.phone
+        
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No profile fields provided for update"
+        )
+        
+    try:
+        with get_db_session() as session:
+            user = session.query(UserModel).filter(
+                and_(UserModel.id == user_id, UserModel.tenant_id == tenant_id)
+            ).first()
+            
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+                
+            # Update fields
+            for key, value in update_data.items():
+                setattr(user, key, value)
+                
+            session.commit()
+            session.refresh(user)
+            
+            return {"message": "Profile updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update profile: {e}")
+
+
 @router.get("/{user_id}")
 async def get_user(
     user_id: int,
@@ -110,6 +162,8 @@ async def create_user(
                 lastname=user_data.lastname.lower(),
                 speciality=user_data.speciality.lower() if user_data.speciality else None,
                 phone=user_data.phone,
+                username=user_data.username,
+                password_hash=hash_password(user_data.password) if user_data.password else None,
                 user_type=user_data.user_type.lower() if user_data.user_type else 'staff',
             )
             session.add(new_user)
@@ -199,10 +253,10 @@ async def delete_user(
         else:
             user_type = user_data.user_type if hasattr(user_data, 'user_type') else None
         
-        if user_type == USER_TYPE_OWNER:
+        if user_type == USER_TYPE_PLATFORM_ADMIN:
             raise HTTPException(
                 status_code=403, 
-                detail="Cannot delete owner user"
+                detail="Cannot delete platform admin user"
             )
     
     try:

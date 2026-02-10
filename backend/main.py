@@ -7,7 +7,7 @@ from strawberry import Schema
 import strawberry
 from datetime import datetime
 from app.api.v1.api import api_router
-from app.core import settings
+from app.core import settings,models
 from app.modules.patients.graphql_schema import Query as PatientsQuery, Mutation as PatientsMutation
 from app.modules.appointments.graphql_schema import Query as AppointmentsQuery, Mutation as AppointmentsMutation
 from app.modules.billing.graphql_schema import Query as BillingQuery, Mutation as BillingMutation
@@ -16,6 +16,7 @@ from app.modules.users.graphql_schema import Query as UsersQuery, Mutation as Us
 from app.modules.asset_management.graphql_schema import Query as AssetQuery, Mutation as AssetMutation
 from app.common.schemas import ErrorResponse
 import app.core.database
+from app.core.db_session import engine,Base
 
 
 app = FastAPI(
@@ -23,6 +24,13 @@ app = FastAPI(
     version=settings.VERSION,
     description="Clinic Management System API - REST and GraphQL"
 )
+
+from app.core.db_session import engine, Base
+from app.core import models  # IMPORTANT: registers all models
+
+@app.on_event("startup")
+def on_startup():
+    Base.metadata.create_all(bind=engine)
 
 from app.core.middleware import (
     RateLimitMiddleware,
@@ -40,7 +48,7 @@ app.add_middleware(
 
 app.add_middleware(
     RateLimitMiddleware,
-    requests_per_minute=60,
+    requests_per_minute=settings.RATE_LIMIT_PER_MINUTE,
     requests_per_hour=1000
 )
 

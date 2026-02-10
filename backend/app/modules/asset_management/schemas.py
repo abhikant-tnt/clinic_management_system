@@ -2,30 +2,26 @@ from pydantic import BaseModel, field_validator
 from typing import Optional
 
 class RoomCreate(BaseModel):
-    """Schema for Room - All fields are optional"""
-    room_number: Optional[str] = None
-    room_type: Optional[str] = None
+    """Schema for Room - Mandatory fields must be required"""
+    room_number: str  # Required
+    room_type: str    # Required
 
-    @field_validator('room_number')
+    @field_validator('room_number', 'room_type')
     @classmethod
-    def validate_room_no(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            v = v.strip()
-            if not v:
-                raise ValueError("Room number cannot be empty if provided")
-        return v
+    def validate_room_fields(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Field cannot be empty")
+        return v.strip()
 
 class MachineCreate(BaseModel):
-    """Schema for Machine - All fields are optional"""
-    name: Optional[str] = None
-    status: Optional[str] = None
-    room_id: Optional[int] = None
+    """Schema for Machine - Mandatory fields must be required"""
+    name: str    # Required
+    status: str  # Required
+    room_id: int # Required
 
     @field_validator('name', 'status')
     @classmethod
-    def validate_machine_fields(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            v = v.strip()
-            if not v:
-                raise ValueError("Field cannot be empty if provided")
-        return v
+    def validate_machine_fields(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Field cannot be empty")
+        return v.strip()

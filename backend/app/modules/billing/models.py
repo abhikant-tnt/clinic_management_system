@@ -1,8 +1,8 @@
 """SQLAlchemy models for Billing module"""
-from sqlalchemy import Column, Integer, String, Text, Date, DECIMAL, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Text, Date, DECIMAL, ForeignKey, DateTime, FetchedValue
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from app.core.models import Base
+from app.core.db_session import Base
 
 class BillingInvoiceModel(Base):
     """Billing invoice model"""
@@ -17,7 +17,7 @@ class BillingInvoiceModel(Base):
     issue_date = Column(Date, nullable=False)
     purpose = Column(Text, nullable=False)
     total_amount = Column(DECIMAL(12, 2), nullable=False)
-    outstanding_amount = Column(DECIMAL(12, 2), nullable=True)  # Generated column
+    outstanding_amount = Column(DECIMAL(12, 2), server_default=FetchedValue())  # Generated column
     status = Column(Text, nullable=False)
     amount_paid = Column(DECIMAL(12, 2), nullable=False)
     payment_mode = Column(String(20), nullable=True)  # "UPI", "Card", "Cash", or None
@@ -64,7 +64,7 @@ class PharmacyWalkInBillModel(Base):
     created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=False, index=True)
     issue_date = Column(Date, nullable=False)
     total_amount = Column(DECIMAL(12, 2), nullable=False)
-    outstanding_amount = Column(DECIMAL(12, 2), nullable=True)  # Generated column
+    outstanding_amount = Column(DECIMAL(12, 2), server_default=FetchedValue())  # Generated column
     status = Column(Text, nullable=False)
     amount_paid = Column(DECIMAL(12, 2), nullable=False)
     payment_mode = Column(String(20), nullable=True)  # "UPI", "Card", "Cash", or None

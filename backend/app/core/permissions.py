@@ -3,13 +3,15 @@ from fastapi import Depends, HTTPException, status
 from typing import List, Optional
 from app.core.dependencies import get_current_active_user
 
-# User types
-USER_TYPE_PLATFORM_ADMIN = "platform_admin"  # Platform team managing entire software
-USER_TYPE_OWNER = "owner"  # Clinic owner/admin (main doctor)
-USER_TYPE_DOCTOR = "doctor"
-USER_TYPE_RECEPTIONIST = "receptionist"
-USER_TYPE_STAFF = "staff"
-USER_TYPE_PHARMACIST = "pharmacist"
+from app.core.constants import (
+    USER_TYPE_PLATFORM_ADMIN,
+    USER_TYPE_OWNER,
+    USER_TYPE_DOCTOR,
+    USER_TYPE_RECEPTIONIST,
+    USER_TYPE_STAFF,
+    USER_TYPE_PHARMACIST,
+    is_platform_admin
+)
 
 # Module names
 MODULE_DASHBOARD = "dashboard"
@@ -125,18 +127,7 @@ def has_permission(user_type: str, module: str, permission: str) -> bool:
     return permission in module_permissions
 
 
-def is_platform_admin(user_type: str) -> bool:
-    """
-    Check if user type is platform admin.
-    Platform admins have cross-tenant access and full system permissions.
-    
-    Args:
-        user_type: The user type to check
-    
-    Returns:
-        True if user is platform admin, False otherwise
-    """
-    return user_type == USER_TYPE_PLATFORM_ADMIN
+
 
 
 def require_permission(module: str, permission: str):

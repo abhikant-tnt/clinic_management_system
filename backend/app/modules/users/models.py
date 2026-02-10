@@ -1,6 +1,6 @@
 """SQLAlchemy models for Users module"""
 from sqlalchemy import Column, Integer, String, Boolean, DateTime
-from app.core.models import Base
+from app.core.db_session import Base
 
 class UserModel(Base):
     """User model"""

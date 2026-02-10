@@ -10,10 +10,10 @@ from app.common.utils import raise_not_found_error, raise_bad_request_error, rai
 from app.core.db_helper import check_exists, get_by_id
 from app.core.date_helpers import date_to_string, string_to_date
 from app.core.db_utils import get_db_session
-from app.core.models import (
-    AppointmentsModel, PatientModel, UserModel, PrescriptionModel, PrescriptionItemModel,
-    BillingInvoiceModel, BillingItemModel
-)
+from app.modules.patients.models import PatientModel
+from app.modules.appointments.models import AppointmentsModel, PrescriptionModel, PrescriptionItemModel
+from app.modules.users.models import UserModel
+from app.modules.billing.models import BillingInvoiceModel, BillingItemModel
 from sqlalchemy import and_, case
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user
@@ -433,7 +433,11 @@ async def create_appointment(appointment: AppointmentCreate, current_user: dict 
             session.add(new_appointment)
             session.commit()
             session.refresh(new_appointment)
-            return {"database": "PostgreSQL", "appointment": appointment_to_dict(new_appointment)}
+            return {
+                "message": "Appointment booked successfully",
+                "database": "PostgreSQL", 
+                "appointment": appointment_to_dict(new_appointment)
+            }
     except Exception as e:
         raise_internal_server_error(f"Error creating appointment: {e}")
 
@@ -972,7 +976,7 @@ async def generate_bill_from_prescription(
                 raise_bad_request_error("Prescription has no items to bill")
             
             # Convert prescription items to bill items format
-            from app.core.models import InventoryItemModel
+            from app.modules.inventory.models import InventoryItemModel
             from decimal import Decimal
             
             bill_items = []
@@ -1065,7 +1069,7 @@ async def search_inventory_items(
     """Search inventory items for prescription item selection"""
     tenant_id = get_tenant_id()
     
-    from app.core.models import InventoryItemModel
+    from app.modules.inventory.models import InventoryItemModel
     
     try:
         with get_db_session() as session:
@@ -1145,7 +1149,7 @@ async def save_to_billings(
             
             from decimal import Decimal
             from datetime import datetime
-            from app.core.models import InventoryItemModel
+            from app.modules.inventory.models import InventoryItemModel
             
             # Separate items into services and products
             service_items = [item for item in bill_payment.items if item.item_type.lower() == "service"]

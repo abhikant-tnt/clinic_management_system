@@ -2,7 +2,7 @@ import strawberry
 from typing import Optional, List
 from sqlalchemy import and_
 from app.core.db_utils import get_db_session
-from app.core.models import RoomModel, MachineModel
+from app.modules.asset_management.models import RoomModel, MachineModel
 from app.core.config import settings
 
 # --- HELPERS ---

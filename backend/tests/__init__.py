@@ -1,4 +1,1 @@
-"""
-Unit tests for clinic management system
-"""
-
+# Test package marker file

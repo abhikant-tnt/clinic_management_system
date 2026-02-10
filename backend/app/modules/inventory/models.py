@@ -1,7 +1,7 @@
 """SQLAlchemy models for Inventory module"""
 from sqlalchemy import Column, Integer, String, Text, Date, DECIMAL, DateTime, Boolean
 from datetime import datetime
-from app.core.models import Base
+from app.core.db_session import Base
 
 class InventoryItemModel(Base):
     """Inventory item model"""

@@ -4,7 +4,7 @@ from datetime import datetime, date
 import uuid
 from app.core.config import settings
 from app.core.db_utils import get_db_session
-from app.core.models import InventoryItemModel
+from app.modules.inventory.models import InventoryItemModel
 from app.core.dependencies import get_current_active_user
 from app.common.utils import raise_not_found_error, raise_internal_server_error
 from sqlalchemy import and_
@@ -228,7 +228,7 @@ async def create_inventory_item(item_data: InventoryItemCreate, current_user: di
             session.commit()
             session.refresh(new_item)
             
-            return {"message": f"Inventory item (SKU) created successfully", "item_id": str(new_item.id)}
+            return {"message": f"Inventory item (SKU) created successfully", "item_id": new_item.id}
     except Exception as e:
         raise_internal_server_error(f"Error creating inventory item: {e}")
 

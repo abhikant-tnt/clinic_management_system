@@ -1,9 +1,15 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, status
 from typing import Optional, List
 import uuid
 from app.core.config import settings
 from app.core.db_utils import get_db_session
-from app.core.models import BillingInvoiceModel, BillingItemModel, PatientModel, AppointmentsModel, UserModel, InventoryItemModel, PharmacyWalkInBillModel, PharmacyWalkInItemModel
+from app.modules.billing.models import (
+    BillingInvoiceModel, BillingItemModel, PharmacyWalkInBillModel, PharmacyWalkInItemModel
+)
+from app.modules.patients.models import PatientModel
+from app.modules.appointments.models import AppointmentsModel
+from app.modules.users.models import UserModel
+from app.modules.inventory.models import InventoryItemModel
 from app.core.dependencies import get_current_active_user
 from app.core.db_helper import check_exists
 from app.common.utils import raise_not_found_error, raise_internal_server_error
@@ -35,7 +41,7 @@ def reduce_inventory_stock(session, items, tenant_id: str):
     Reduce inventory stock for pharmacy items when bill is paid.
     Items can be BillingItemModel or PharmacyWalkInItemModel.
     """
-    from app.core.models import InventoryItemModel
+    from app.modules.inventory.models import InventoryItemModel
     
     for item in items:
         # Handle both BillingItemModel and PharmacyWalkInItemModel
@@ -284,7 +290,7 @@ async def get_invoice(invoice_id: str, current_user: dict = Depends(get_current_
     except Exception as e:
         raise_internal_server_error(f"Error fetching invoice: {e}")
 
-@router.post("/invoices")
+@router.post("/invoices", status_code=status.HTTP_201_CREATED)
 async def create_invoice(invoice_data: BillingInvoiceCreate, current_user: dict = Depends(get_current_active_user)):
     # Use string tenant_id (VARCHAR) instead of UUID
     tenant_id_to_use = invoice_data.tenant_id if invoice_data.tenant_id else settings.TENANT_ID
@@ -355,7 +361,7 @@ async def create_invoice(invoice_data: BillingInvoiceCreate, current_user: dict 
             session.refresh(new_invoice)
             
             # Reduce inventory stock if pharmacy bill is paid
-            if (invoice_data.status == "paid" or (new_invoice.outstanding_amount and float(new_invoice.outstanding_amount) == 0)):
+            if (invoice_data.status == "paid" or (getattr(new_invoice, 'outstanding_amount', None) is not None and float(new_invoice.outstanding_amount) == 0)):
                 # Check if this is a pharmacy bill
                 if new_invoice.bill_type == "pharmacy":
                     # Get billing items
@@ -706,7 +712,7 @@ async def get_walk_in_bill(bill_id: str, current_user: dict = Depends(get_curren
     except Exception as e:
         raise_internal_server_error(f"Error fetching walk-in bill: {e}")
 
-@router.post("/pharmacy/walk-in")
+@router.post("/pharmacy/walk-in", status_code=status.HTTP_201_CREATED)
 async def create_walk_in_bill(bill_data: PharmacyWalkInBillCreate, current_user: dict = Depends(get_current_active_user)):
     """Create a walk-in pharmacy bill"""
     tenant_id_to_use = bill_data.tenant_id if bill_data.tenant_id else settings.TENANT_ID
@@ -749,7 +755,7 @@ async def create_walk_in_bill(bill_data: PharmacyWalkInBillCreate, current_user:
             session.flush()  # Get the bill ID
             
             # Create bill items
-            from app.core.models import InventoryItemModel
+            from app.modules.inventory.models import InventoryItemModel
             for item in bill_data.items:
                 inventory_item_id = int(item.inventory_item_id) if item.inventory_item_id else None
                 expiry_date = None
@@ -779,7 +785,7 @@ async def create_walk_in_bill(bill_data: PharmacyWalkInBillCreate, current_user:
             session.refresh(new_bill)
             
             # Reduce inventory stock if bill is paid
-            if bill_data.status == "paid" or (new_bill.outstanding_amount and float(new_bill.outstanding_amount) == 0):
+            if bill_data.status == "paid" or (getattr(new_bill, 'outstanding_amount', None) is not None and float(new_bill.outstanding_amount) == 0):
                 bill_items = session.query(PharmacyWalkInItemModel).filter(
                     PharmacyWalkInItemModel.bill_id == new_bill.id
                 ).all()

@@ -4,6 +4,7 @@ from fastapi import Request, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
+from app.core.config import settings
 from collections import defaultdict
 from datetime import datetime, timedelta
 import re
@@ -34,7 +35,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app: ASGIApp,
-        requests_per_minute: int = 60,
+        requests_per_minute: int = settings.RATE_LIMIT_PER_MINUTE,
         requests_per_hour: int = 1000
     ):
         super().__init__(app)

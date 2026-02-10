@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, Literal
+from app.core.validators import validate_phone_number
 from datetime import date
 import re
 
@@ -7,6 +8,10 @@ import re
 BloodGroup = Literal["O+ve", "O-ve", "A+ve", "A-ve", "B+ve", "B-ve", "AB+ve", "AB-ve"]
 Purpose = Literal["consultation", "follow up", "treatment"]
 PatientStatus = Literal["scheduled", "no_show", "cancelled", "In progress", "checked_in"]
+Gender = Literal["male", "female", "other"]
+PatientSortOrder = Literal["newest", "oldest", "alphabetic"]
+PatientFileType = Literal["photo", "documents", "prescriptions"]
+
 
 def calculate_age(dob: str) -> int:
     """Calculate age from dob in dd/mm/yyyy format"""
@@ -15,12 +20,6 @@ def calculate_age(dob: str) -> int:
     today = date.today()
     return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
 
-def validate_phone(v: str) -> str:
-    """Validate phone number: exactly 10 digits, only digits allowed"""
-    v = v.strip() if v else ""
-    if not v or not v.isdigit() or len(v) != 10:
-        raise ValueError("Phone number must contain exactly 10 digits (numbers only)")
-    return v
 
 def validate_pincode(v: str) -> str:
     """Validate pincode: numbers only, no alphabets allowed"""
@@ -76,7 +75,7 @@ class PatientCreate(BaseModel):
     email: EmailStr  # Required *
     primary_doctor: Optional[int] = None  # Dropdown from staff table (staff ID)
     dob: str  # Required * - used to calculate age automatically
-    gender: Literal["male", "female", "other"]  # Required *
+    gender: Gender  # Required *
     blood_group: Optional[BloodGroup] = None  # Dropdown menu
     status: PatientStatus  # Required * - values: scheduled, no_show, cancelled, In progress, checked_in
     vip: Optional[bool] = False  # VIP status
@@ -136,7 +135,7 @@ class PatientCreate(BaseModel):
     def validate_phone_fields(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        return validate_phone(v)
+        return validate_phone_number(v)
 
     @field_validator('pincode', 'pincode2', 'billing_pincode', 'billing_pincode2')
     @classmethod
@@ -171,7 +170,7 @@ class PatientUpdate(BaseModel):
     firstname: Optional[str] = None
     lastname: Optional[str] = None
     dob: Optional[str] = None  # If provided, age will be recalculated
-    gender: Optional[Literal["male", "female", "other"]] = None
+    gender: Optional[Gender] = None
     phone: Optional[str] = None
     email: Optional[EmailStr] = None
     primary_doctor: Optional[int] = None  # Staff ID
@@ -222,7 +221,7 @@ class PatientUpdate(BaseModel):
     def validate_phone_fields(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        return validate_phone(v)
+        return validate_phone_number(v)
 
     @field_validator('pincode', 'pincode2', 'billing_pincode', 'billing_pincode2')
     @classmethod
@@ -302,7 +301,7 @@ class PatientModel(BaseModel):
     lastname: str
     dob: str
     age: int  # Calculated from dob
-    gender: Literal["male", "female", "other"]
+    gender: Gender
     phone: str
     email: Optional[EmailStr] = None
     primary_doctor: Optional[int] = None  # Staff ID

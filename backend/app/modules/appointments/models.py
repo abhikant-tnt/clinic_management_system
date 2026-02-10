@@ -2,7 +2,7 @@
 from sqlalchemy import Column, Integer, String, Text, Date, Time, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from app.core.models import Base
+from app.core.db_session import Base
 
 class AppointmentsModel(Base):
     """Appointment model"""

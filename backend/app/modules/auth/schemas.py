@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import Optional, Literal
 from datetime import datetime
 import re
+from app.core.validators import validate_phone_number
 
 
 def validate_username_format(v: str) -> str:
@@ -24,12 +25,6 @@ def validate_password_strength(v: str) -> str:
         raise ValueError("Password must contain at least one digit")
     return v
 
-def validate_phone(v: str) -> str:
-    """Validate phone number: exactly 10 digits"""
-    v = v.strip()
-    if not v.isdigit() or len(v) != 10:
-        raise ValueError("Phone number must contain exactly 10 digits (numbers only)")
-    return v
 
 class UserLogin(BaseModel):
     """Schema for user login request"""
@@ -49,17 +44,18 @@ class Token(BaseModel):
     user_type: str = Field(..., description="User type: 'doctor' or 'staff'")
     user_id: int = Field(..., description="User ID")
     username: str = Field(..., description="Username")
+    message: Optional[str] = Field(default="Login successful", description="Success message")
 
 
 class UserRegister(BaseModel):
     """Schema for user registration (creates staff with login credentials)"""
     firstname: str = Field(..., min_length=1, max_length=255, description="First name")
     lastname: str = Field(..., min_length=1, max_length=255, description="Last name")
-    phone: str = Field(..., min_length=10, max_length=10, description="Phone number (10 digits)")
+    phone: str = Field(..., description="Phone number (10 digits)")
     speciality: Optional[str] = Field(None, max_length=255, description="Speciality (for doctors)")
     username: str = Field(..., min_length=3, max_length=100, description="Username for login")
     password: str = Field(..., min_length=8, description="Password")
-    user_type: Literal["doctor", "staff"] = Field(..., description="User type: 'doctor' or 'staff'")
+    user_type: Literal["owner", "doctor", "receptionist", "staff", "pharmacist"] = Field(..., description="User type")
     
     @field_validator('username')
     @classmethod
@@ -74,7 +70,7 @@ class UserRegister(BaseModel):
     @field_validator('phone')
     @classmethod
     def validate_phone_field(cls, v: str) -> str:
-        return validate_phone(v)
+        return validate_phone_number(v)
     
     @field_validator('firstname', 'lastname')
     @classmethod
@@ -111,25 +107,26 @@ class UserResponse(BaseModel):
     last_login: Optional[datetime] = None
 
 
-class UserUpdate(BaseModel):
-    """Schema for updating current user's account"""
-    current_password: Optional[str] = Field(None, min_length=6, description="Current password (required if changing password)")
-    new_password: Optional[str] = Field(None, min_length=8, description="New password")
-    username: Optional[str] = Field(None, min_length=3, max_length=100, description="New username")
-    
-    @field_validator('username')
-    @classmethod
-    def validate_username(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        return validate_username_format(v)
+class ChangePasswordRequest(BaseModel):
+    """Schema for changing user password"""
+    current_password: str = Field(..., min_length=6, description="Current password")
+    new_password: str = Field(..., min_length=8, description="New password")
     
     @field_validator('new_password')
     @classmethod
-    def validate_new_password(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
+    def validate_new_password(cls, v: str) -> str:
         return validate_password_strength(v)
+
+
+class ChangeUsernameRequest(BaseModel):
+    """Schema for changing username"""
+    current_password: str = Field(..., min_length=6, description="Password confirmation required")
+    new_username: str = Field(..., min_length=3, max_length=100, description="New username")
+    
+    @field_validator('new_username')
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        return validate_username_format(v)
 
 
 class UserDelete(BaseModel):

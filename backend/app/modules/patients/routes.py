@@ -1,18 +1,22 @@
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form, Depends
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form, Depends, status
 from fastapi.responses import JSONResponse, FileResponse
 from pathlib import Path
 from typing import Optional, Any, Union, List
 from datetime import date, timedelta
-from app.modules.patients.schemas import PatientCreate, PatientUpdate, calculate_age
+from app.modules.patients.schemas import PatientCreate, PatientUpdate, PatientStatus, Gender, PatientSortOrder, PatientFileType, calculate_age
 from app.common.schemas import ErrorResponse
 from app.common.utils import validate_column_names, create_error_response, raise_not_found_error, raise_bad_request_error, raise_internal_server_error
 from app.core.db_helper import check_exists, get_by_id
 from app.core.date_helpers import string_to_date, date_to_string
 from app.core.db_utils import get_db_session
-from app.core.models import PatientModel, DocumentsModel, UserModel
-from sqlalchemy import and_
+from app.modules.patients.models import PatientModel, DocumentsModel
+from app.modules.users.models import UserModel
+from app.modules.appointments.models import AppointmentsModel
+from app.modules.billing.models import BillingInvoiceModel
+from sqlalchemy import and_, func
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user
+from app.core.permissions import require_patients_view, require_patients_full
 from app.core.storage import (
     create_patient_folders, 
     delete_patient_folder,
@@ -27,15 +31,16 @@ def get_tenant_id() -> str:
     return settings.TENANT_ID
 
 @router.get("/users/doctors")
-async def get_doctors_list(current_user: dict = Depends(get_current_active_user)):
-    """Get list of staff members (doctors) for primary_doctor dropdown"""
+async def get_doctors_list(current_user: dict = Depends(require_patients_full)):
+    """Get list of staff members (doctors/owners) for primary_doctor dropdown"""
     tenant_id = get_tenant_id()
     try:
         with get_db_session() as session:
             staff = session.query(UserModel).filter(
                 and_(
                     UserModel.tenant_id == tenant_id,
-                    UserModel.user_type.in_(['owner', 'doctor', 'receptionist'])
+                    UserModel.is_active == True,
+                    UserModel.user_type.in_(['owner', 'doctor'])
                 )
             ).all()
             doctors = [{"id": s.id, "firstname": s.firstname, "lastname": s.lastname, "full_name": f"{s.firstname} {s.lastname}"} for s in staff]
@@ -144,23 +149,23 @@ def _insert_patient_sql(patient_data: PatientCreate, calculated_age: int, tenant
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id"""
     params = (tenant_id_to_use, patient_data.firstname.lower(), patient_data.lastname.lower(),
-              dob_date, calculated_age, patient_data.gender.lower(), patient_data.phone,
-              patient_data.email.lower() if patient_data.email else None,
-              patient_data.primary_doctor,
-              patient_data.blood_group,
-              patient_data.address1.lower(), patient_data.address2.lower() if patient_data.address2 else None,
-              patient_data.country.lower() if patient_data.country else None,
-              patient_data.city.lower() if patient_data.city else None, patient_data.state.lower() if patient_data.state else None, patient_data.pincode,
-              patient_data.emergency_contact_name.lower() if patient_data.emergency_contact_name else None, patient_data.emergency_contact_phone,
-              reg_date, patient_data.referral_source.lower() if patient_data.referral_source else None,
-              patient_data.referral_subcategory.lower() if patient_data.referral_subcategory else None,
-              patient_data.status,
-              patient_data.past_medical_record or "None", patient_data.dermatological_history or "None",
-              patient_data.medications or "None", patient_data.surgeries or "None", patient_data.hormonal_issues or "None",
-              patient_data.allergies or "None", patient_data.lifestyle_assessment or "None",
-              patient_data.billing_name, patient_data.billing_gstin,
-              patient_data.billing_phone, patient_data.billing_state.lower() if patient_data.billing_state else None,
-              patient_data.billing_address.lower() if patient_data.billing_address else None)
+            dob_date, calculated_age, patient_data.gender.lower(), patient_data.phone,
+            patient_data.email.lower() if patient_data.email else None,
+            patient_data.primary_doctor,
+            patient_data.blood_group,
+            patient_data.address1.lower(), patient_data.address2.lower() if patient_data.address2 else None,
+            patient_data.country.lower() if patient_data.country else None,
+            patient_data.city.lower() if patient_data.city else None, patient_data.state.lower() if patient_data.state else None, patient_data.pincode,
+            patient_data.emergency_contact_name.lower() if patient_data.emergency_contact_name else None, patient_data.emergency_contact_phone,
+            reg_date, patient_data.referral_source.lower() if patient_data.referral_source else None,
+            patient_data.referral_subcategory.lower() if patient_data.referral_subcategory else None,
+            patient_data.status,
+            patient_data.past_medical_record or "None", patient_data.dermatological_history or "None",
+            patient_data.medications or "None", patient_data.surgeries or "None", patient_data.hormonal_issues or "None",
+            patient_data.allergies or "None", patient_data.lifestyle_assessment or "None",
+            patient_data.billing_name, patient_data.billing_gstin,
+            patient_data.billing_phone, patient_data.billing_state.lower() if patient_data.billing_state else None,
+            patient_data.billing_address.lower() if patient_data.billing_address else None)
     return insert_sql, params
 
 @router.get("/")
@@ -168,7 +173,7 @@ async def get_patients(
     page: int = Query(1, ge=1), 
     limit: int = Query(10, ge=1, le=10),  # Max 10 per page as per requirements
     week_start: Optional[str] = Query(None, description="Week start date (dd/mm/yyyy). Defaults to current week"),
-    current_user: dict = Depends(get_current_active_user)
+    current_user: dict = Depends(require_patients_view)
 ):
     """Get patients for table view - default to current week, sorted by status (In progress first, then scheduled for today)"""
     tenant_id = get_tenant_id()
@@ -243,7 +248,6 @@ async def get_patients(
         table_patients.append({
             "id": p["id"],
             "patient": f"{p.get('firstname', '')} {p.get('lastname', '')}".strip(),
-            "patient_id": f"#{p.get('id', 0)}",
             "number": p.get("phone", ""),
             "email_id": p.get("email", ""),
             "status": p.get("status", ""),
@@ -274,126 +278,94 @@ async def advanced_search_patients(
     q: Optional[str] = Query(None),
     age_min: Optional[int] = Query(None, ge=1, le=110),
     age_max: Optional[int] = Query(None, ge=1, le=110),
-    gender: Optional[str] = Query(None),
-    status: Optional[str] = Query(None, description="Filter by patient status"),
+    gender: Optional[Gender] = Query(None, description="Filter by gender (male/female/other)"),
+    status: Optional[PatientStatus] = Query(None, description="Filter by patient status (scheduled, checked_in, etc.)"),
     last_visit_days: Optional[int] = Query(None, ge=1),
-    sort_by: Optional[str] = Query("newest", pattern="^(newest|oldest|alphabetic)$"),
+    sort_by: Optional[PatientSortOrder] = Query("newest", description="Sort order"),
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=10),  # Max 10 per page as per requirements
-    current_user: dict = Depends(get_current_active_user)
+    current_user: dict = Depends(require_patients_view)
 ):
     tenant_id = get_tenant_id()
-    conditions = ["tenant_id = %s"]
-    params = [tenant_id]
-    if q and q.strip():
-        search_term = q.strip()
-        if search_term.isdigit():
-            conditions.append("id = %s")
-            params.append(int(search_term))
-        else:
-            conditions.append("(firstname ILIKE %s OR lastname ILIKE %s OR phone ILIKE %s OR email ILIKE %s)")
-            params.extend([f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"])
-    if age_min is not None:
-        conditions.append("age >= %s")
-        params.append(age_min)
-    if age_max is not None:
-        conditions.append("age <= %s")
-        params.append(age_max)
-    if gender:
-        conditions.append("gender = %s")
-        params.append(gender)
-    if status:
-        # Check both status and patient_status fields for backward compatibility
-        conditions.append("(status = %s OR patient_status = %s)")
-        params.extend([status, status])
     
-    patients_list = []
-    if postgres_cursor:
-        try:
-            postgres_cursor.execute("SELECT * FROM patients_table WHERE tenant_id = %s", (tenant_id,))
-            columns = [desc[0] for desc in postgres_cursor.description]
-            all_patients = [dict(zip(columns, r)) for r in postgres_cursor.fetchall()]
-            search_lower = q.strip().lower() if q and q.strip() else None
-            for patient_data in all_patients:
-                if q and q.strip():
-                    if q.strip().isdigit() and patient_data.id != int(q.strip()):
-                        continue
-                    elif not q.strip().isdigit():
-                        firstname = (patient_data.firstname or "").lower() if hasattr(patient_data, 'firstname') else (patient_data.get("firstname") or "").lower()
-                        lastname = (patient_data.lastname or "").lower() if hasattr(patient_data, 'lastname') else (patient_data.get("lastname") or "").lower()
-                        phone = (patient_data.phone or "").lower() if hasattr(patient_data, 'phone') else (patient_data.get("phone") or "").lower()
-                        email = (patient_data.email or "").lower() if hasattr(patient_data, 'email') else (patient_data.get("email") or "").lower()
-                        if not (search_lower in firstname or search_lower in lastname or search_lower in phone or search_lower in email):
-                            continue
-                if age_min is not None and patient_data.age < age_min:
-                    continue
-                if age_max is not None and patient_data.age > age_max:
-                    continue
-                if gender and patient_data.gender != gender:
-                    continue
-                if status:
-                    patient_status_val = getattr(patient_data, 'status', None) or getattr(patient_data, 'patient_status', None)
-                    if patient_status_val != status:
-                        continue
-                patients_list.append(patient_to_dict(patient_data))
-        except Exception as e:
-            pass
-    if postgres_cursor:
-        try:
-            query = f"SELECT * FROM patients_table WHERE {' AND '.join(conditions)}"
-            postgres_cursor.execute(query, params)
-            columns = [desc[0] for desc in postgres_cursor.description]
-            for record in postgres_cursor.fetchall():
-                patients_list.append(dict(zip(columns, record)))
-        except Exception as e:
-            pass
-    if last_visit_days:
-        from datetime import datetime, timedelta
-        cutoff = datetime.now() - timedelta(days=last_visit_days)
-        filtered = []
-        for patient_data in patients_list:
-            patient_id = patient_data.get("id")
-            try:
-                if postgres_cursor:
-                    postgres_cursor.execute(
-                        "SELECT MAX(visit_date) FROM visits WHERE patient_id = %s AND tenant_id = %s",
-                        (patient_id, tenant_id)
-                    )
-                    result = postgres_cursor.fetchone()
-                    if result and result[0]:
-                        d, m, y = map(int, result[0].split('/'))
-                        if datetime(y, m, d) >= cutoff:
-                            filtered.append(patient_data)
-            except Exception:
-                pass
-        patients_list = filtered
-    if sort_by == "newest":
-        patients_list.sort(key=lambda x: x.get("id", 0), reverse=True)
-    elif sort_by == "oldest":
-        patients_list.sort(key=lambda x: x.get("id", 0))
-    elif sort_by == "alphabetic":
-        patients_list.sort(key=lambda x: (x.get("firstname", "").lower(), x.get("lastname", "").lower()))
-    total = len(patients_list)
-    total_pages = (total + limit - 1) // limit if total > 0 else 1
-    paginated = patients_list[(page - 1) * limit:page * limit]
-    
-    return {
-        "patients": paginated,
-        "pagination": {"total": total, "page": page, "limit": limit, "total_pages": total_pages, "has_next": page < total_pages, "has_prev": page > 1},
-        "filters": {"search": q, "age_min": age_min, "age_max": age_max, "gender": gender, "status": status, "last_visit_days": last_visit_days},
-        "sort_by": sort_by
-    }
+    try:
+        with get_db_session() as session:
+            query = session.query(PatientModel).filter(PatientModel.tenant_id == tenant_id)
+            
+            if q and q.strip():
+                search_term = q.strip().lower()
+                # Create base filters for name, phone, and email
+                search_filters = (
+                    (PatientModel.firstname.ilike(f"%{search_term}%")) |
+                    (PatientModel.lastname.ilike(f"%{search_term}%")) |
+                    (PatientModel.phone.ilike(f"%{search_term}%")) |
+                    (PatientModel.email.ilike(f"%{search_term}%"))
+                )
+                
+                # If numeric, also include search by Patient ID
+                if search_term.isdigit():
+                    search_filters = search_filters | (PatientModel.id == int(search_term))
+                
+                query = query.filter(search_filters)
+            
+            if age_min is not None:
+                query = query.filter(PatientModel.age >= age_min)
+            if age_max is not None:
+                query = query.filter(PatientModel.age <= age_max)
+            if gender:
+                query = query.filter(PatientModel.gender == gender.lower())
+            if status:
+                query = query.filter(PatientModel.status == status)
+            
+            # Application-level filtering for visit days (if required, though usually better in SQL)
+            # For now, let's keep it simple and fix the core search
+            
+            if sort_by == "newest":
+                query = query.order_by(PatientModel.id.desc())
+            elif sort_by == "oldest":
+                query = query.order_by(PatientModel.id.asc())
+            elif sort_by == "alphabetic":
+                query = query.order_by(PatientModel.firstname.asc(), PatientModel.lastname.asc())
+            
+            total = query.count()
+            items = query.offset((page - 1) * limit).limit(limit).all()
+            patients_list = [patient_to_dict(item) for item in items]
+            
+            total_pages = (total + limit - 1) // limit if total > 0 else 1
+            
+            return {
+                "patients": patients_list,
+                "pagination": {
+                    "total": total,
+                    "page": page,
+                    "limit": limit,
+                    "total_pages": total_pages,
+                    "has_next": page < total_pages,
+                    "has_prev": page > 1
+                },
+                "filters": {
+                    "search": q,
+                    "age_min": age_min,
+                    "age_max": age_max,
+                    "gender": gender,
+                    "status": status,
+                    "last_visit_days": last_visit_days
+                },
+                "sort_by": sort_by
+            }
+    except Exception as e:
+        raise_internal_server_error(f"Error during search: {e}")
 
 @router.get("/{patient_id}")
-async def get_patient(patient_id: int, current_user: dict = Depends(get_current_active_user)):
+async def get_patient(patient_id: int, current_user: dict = Depends(require_patients_view)):
     tenant_id = get_tenant_id()
     patient_data = get_patient_by_id(patient_id, tenant_id)
     if patient_data:
         return {"database": "PostgreSQL", "patient": patient_to_dict(patient_data)}
-    raise HTTPException(status_code=404, detail=f"Patient with ID {patient_id} not found.")
+    raise_not_found_error("Patient", patient_id)
 
-@router.post("/")
-async def create_patient(patient_data: PatientCreate, current_user: dict = Depends(get_current_active_user)):
+@router.post("/", status_code=status.HTTP_201_CREATED)
+async def create_patient(patient_data: PatientCreate, current_user: dict = Depends(require_patients_full)):
     """Create a new patient - auto-saves registration_date as today's date if not provided"""
     tenant_id = get_tenant_id()
     calculated_age = calculate_age(patient_data.dob)
@@ -424,7 +396,7 @@ async def create_patient(patient_data: PatientCreate, current_user: dict = Depen
             if existing:
                 return create_error_response("Patient with this phone number already exists for this tenant.", 400)
             
-            # Get primary_doctor - default to first doctor if not provided
+            # Get primary_doctor - default to first doctor/owner if not provided
             primary_doctor_id = patient_data.primary_doctor
             if not primary_doctor_id:
                 # Get first doctor from users table (user_type='doctor' or 'owner', is_active=True, ORDER BY id ASC)
@@ -432,12 +404,12 @@ async def create_patient(patient_data: PatientCreate, current_user: dict = Depen
                     and_(
                         UserModel.tenant_id == tenant_id_to_use,
                         UserModel.is_active == True,
-                        UserModel.user_type.in_(['owner', 'doctor', 'receptionist'])
+                        UserModel.user_type.in_(['owner', 'doctor'])
                     )
                 ).order_by(UserModel.id.asc()).first()
                 
                 if not first_doctor:
-                    return create_error_response("No active doctor/user found. Please create a doctor/user first.", 400)
+                    return create_error_response("No active doctor/owner found. Please create a doctor/owner first.", 400)
                 primary_doctor_id = first_doctor.id
             
             # Validate primary_doctor exists
@@ -511,148 +483,110 @@ async def create_patient(patient_data: PatientCreate, current_user: dict = Depen
         raise_internal_server_error(f"Error creating patient: {e}")
 
 @router.put("/{patient_id}")
-async def update_patient(patient_id: int, patient_data: PatientUpdate, current_user: dict = Depends(get_current_active_user)):
+async def update_patient(patient_id: int, patient_data: PatientUpdate, current_user: dict = Depends(require_patients_full)):
     tenant_id = get_tenant_id()
-    if not check_patient_exists(patient_id, tenant_id):
-        raise_not_found_error("Patient", patient_id)
-    
-    calculated_age = calculate_age(patient_data.dob) if patient_data.dob else None
-    update_data = {}
-    if patient_data.firstname is not None:
-        if not patient_data.firstname.strip():
-            return create_error_response("Firstname cannot be empty", 400)
-        update_data["firstname"] = patient_data.firstname.lower()
-    if patient_data.lastname is not None:
-        if not patient_data.lastname.strip():
-            return create_error_response("Lastname cannot be empty", 400)
-        update_data["lastname"] = patient_data.lastname.lower()
-    if calculated_age is not None:
-        update_data["age"] = calculated_age
-    if patient_data.gender is not None:
-        update_data["gender"] = patient_data.gender.lower()
-    if patient_data.phone is not None:
-        update_data["phone"] = patient_data.phone
-    if patient_data.email is not None:
-        update_data["email"] = patient_data.email.lower() if patient_data.email else None
-    if patient_data.dob is not None:
-        update_data["dob"] = patient_data.dob
-    if patient_data.primary_doctor is not None:
-        update_data["primary_doctor"] = patient_data.primary_doctor  # Staff ID (integer)
-    if patient_data.blood_group is not None:
-        update_data["blood_group"] = patient_data.blood_group
-    if patient_data.status is not None:
-        update_data["status"] = patient_data.status
-    if patient_data.vip is not None:
-        update_data["vip"] = patient_data.vip
-    if patient_data.country is not None:
-        update_data["country"] = patient_data.country.lower() if patient_data.country else None
-    if patient_data.country2 is not None:
-        update_data["country2"] = patient_data.country2.lower() if patient_data.country2 else None
-    if patient_data.city2 is not None:
-        update_data["city2"] = patient_data.city2.lower() if patient_data.city2 else None
-    if patient_data.state2 is not None:
-        update_data["state2"] = patient_data.state2.lower() if patient_data.state2 else None
-    if patient_data.pincode2 is not None:
-        update_data["pincode2"] = patient_data.pincode2
-    if patient_data.image is not None:
-        update_data["image"] = patient_data.image
-    if patient_data.past_medical_record is not None:
-        update_data["past_medical_record"] = patient_data.past_medical_record
-    if patient_data.dermatological_history is not None:
-        update_data["dermatological_history"] = patient_data.dermatological_history
-    if patient_data.medications is not None:
-        update_data["medications"] = patient_data.medications
-    if patient_data.surgeries is not None:
-        update_data["surgeries"] = patient_data.surgeries
-    if patient_data.hormonal_issues is not None:
-        update_data["hormonal_issues"] = patient_data.hormonal_issues
-    if patient_data.allergies is not None:
-        update_data["allergies"] = patient_data.allergies
-    if patient_data.lifestyle_assessment is not None:
-        update_data["lifestyle_assessment"] = patient_data.lifestyle_assessment
-    # New billing fields
-    if patient_data.billing_firstname is not None:
-        update_data["billing_firstname"] = patient_data.billing_firstname.lower() if patient_data.billing_firstname else None
-    if patient_data.billing_lastname is not None:
-        update_data["billing_lastname"] = patient_data.billing_lastname.lower() if patient_data.billing_lastname else None
-    if patient_data.billing_email is not None:
-        update_data["billing_email"] = patient_data.billing_email.lower() if patient_data.billing_email else None
-    if patient_data.billing_gstin is not None:
-        update_data["billing_gstin"] = patient_data.billing_gstin
-    if patient_data.billing_phone is not None:
-        update_data["billing_phone"] = patient_data.billing_phone
-    if patient_data.billing_address1 is not None:
-        update_data["billing_address1"] = patient_data.billing_address1.lower() if patient_data.billing_address1 else None
-    if patient_data.billing_address2 is not None:
-        update_data["billing_address2"] = patient_data.billing_address2.lower() if patient_data.billing_address2 else None
-    if patient_data.billing_country is not None:
-        update_data["billing_country"] = patient_data.billing_country.lower() if patient_data.billing_country else None
-    if patient_data.billing_country2 is not None:
-        update_data["billing_country2"] = patient_data.billing_country2.lower() if patient_data.billing_country2 else None
-    if patient_data.billing_state is not None:
-        update_data["billing_state"] = patient_data.billing_state.lower() if patient_data.billing_state else None
-    if patient_data.billing_state2 is not None:
-        update_data["billing_state2"] = patient_data.billing_state2.lower() if patient_data.billing_state2 else None
-    if patient_data.billing_city is not None:
-        update_data["billing_city"] = patient_data.billing_city.lower() if patient_data.billing_city else None
-    if patient_data.billing_city2 is not None:
-        update_data["billing_city2"] = patient_data.billing_city2.lower() if patient_data.billing_city2 else None
-    if patient_data.billing_pincode is not None:
-        update_data["billing_pincode"] = patient_data.billing_pincode
-    if patient_data.billing_pincode2 is not None:
-        update_data["billing_pincode2"] = patient_data.billing_pincode2
-    # Legacy billing fields
-    if patient_data.billing_name is not None:
-        update_data["billing_name"] = patient_data.billing_name
-    if patient_data.billing_address is not None:
-        update_data["billing_address"] = patient_data.billing_address.lower() if patient_data.billing_address else None
-    if patient_data.address1 is not None:
-        update_data["address1"] = patient_data.address1.lower()
-    if patient_data.address2 is not None:
-        update_data["address2"] = patient_data.address2.lower() if patient_data.address2 else None
-    if patient_data.city is not None:
-        update_data["city"] = patient_data.city.lower()
-    if patient_data.state is not None:
-        update_data["state"] = patient_data.state.lower()
-    if patient_data.pincode is not None:
-        update_data["pincode"] = patient_data.pincode
-    if patient_data.emergency_contact_name is not None:
-        update_data["emergency_contact_name"] = patient_data.emergency_contact_name.lower()
-    if patient_data.emergency_contact_phone is not None:
-        update_data["emergency_contact_phone"] = patient_data.emergency_contact_phone
-    if patient_data.registration_date is not None:
-        update_data["registration_date"] = patient_data.registration_date
-    if patient_data.referral_source is not None:
-        update_data["referral_source"] = patient_data.referral_source.lower()
-    if patient_data.referral_subcategory is not None:
-        update_data["referral_subcategory"] = patient_data.referral_subcategory.lower() if patient_data.referral_subcategory else None
-    # Status field already handled above
-    if not update_data:
-        return create_error_response("No fields provided for update", 400)
-    
+    if not patient_id:
+        return create_error_response("Patient ID is required", 400)
+
     try:
         with get_db_session() as session:
+            # 1. Fetch the patient first to ensure they exist and to get session access
             patient = session.query(PatientModel).filter(
                 and_(PatientModel.id == patient_id, PatientModel.tenant_id == tenant_id)
             ).first()
             if not patient:
-                raise_not_found_error(f"Patient with ID {patient_id} not found for this tenant.")
+                raise_not_found_error("Patient", patient_id)
+
+            update_data = {}
+            
+            # 2. Handle Name Fields
+            if patient_data.firstname is not None:
+                if not patient_data.firstname.strip():
+                    return create_error_response("Firstname cannot be empty", 400)
+                update_data["firstname"] = patient_data.firstname.lower()
+            if patient_data.lastname is not None:
+                if not patient_data.lastname.strip():
+                    return create_error_response("Lastname cannot be empty", 400)
+                update_data["lastname"] = patient_data.lastname.lower()
+
+            # 3. Handle Date fields with conversion
+            if patient_data.dob is not None:
+                dob_date = string_to_date(patient_data.dob)
+                if not dob_date:
+                    return create_error_response("Invalid DOB format. Use dd/mm/yyyy", 400)
+                update_data["dob"] = dob_date
+                update_data["age"] = calculate_age(patient_data.dob)
+
+            if patient_data.registration_date is not None:
+                reg_date = string_to_date(patient_data.registration_date)
+                if not reg_date:
+                    return create_error_response("Invalid registration date format. Use dd/mm/yyyy", 400)
+                update_data["registration_date"] = reg_date
+
+            # 4. Handle Primary Doctor Validation
+            if patient_data.primary_doctor is not None:
+                doctor = session.query(UserModel).filter(
+                    and_(UserModel.id == patient_data.primary_doctor, UserModel.tenant_id == tenant_id)
+                ).first()
+                if not doctor:
+                    return create_error_response(f"Doctor with ID {patient_data.primary_doctor} not found.", 400)
+                update_data["primary_doctor"] = patient_data.primary_doctor
+
+            # 5. Handle all other fields
+            if patient_data.gender is not None:
+                update_data["gender"] = patient_data.gender.lower()
+            if patient_data.phone is not None:
+                update_data["phone"] = patient_data.phone
+            if patient_data.email is not None:
+                update_data["email"] = patient_data.email.lower() if patient_data.email else None
+            if patient_data.blood_group is not None:
+                update_data["blood_group"] = patient_data.blood_group
+            if patient_data.status is not None:
+                update_data["status"] = patient_data.status
+            if patient_data.vip is not None:
+                update_data["vip"] = patient_data.vip
+            if patient_data.address1 is not None:
+                update_data["address1"] = patient_data.address1.lower()
+            if patient_data.address2 is not None:
+                update_data["address2"] = patient_data.address2.lower() if patient_data.address2 else None
+            
+            # Additional text fields
+            text_fields = [
+                "country", "country2", "city", "city2", "state", "state2", "pincode", "pincode2",
+                "image", "emergency_contact_name", "emergency_contact_phone", "referral_source", "referral_subcategory",
+                "past_medical_record", "dermatological_history", "medications", "surgeries", "hormonal_issues", 
+                "allergies", "lifestyle_assessment", "billing_firstname", "billing_lastname", "billing_email",
+                "billing_gstin", "billing_phone", "billing_address1", "billing_address2", "billing_country",
+                "billing_country2", "billing_state", "billing_state2", "billing_city", "billing_city2",
+                "billing_pincode", "billing_pincode2"
+            ]
+            
+            for field in text_fields:
+                val = getattr(patient_data, field, None)
+                if val is not None:
+                    if isinstance(val, str):
+                        update_data[field] = val.lower() if field not in ["image", "pincode", "pincode2", "billing_pincode", "billing_pincode2", "emergency_contact_phone", "billing_phone"] else val
+                    else:
+                        update_data[field] = val
+
+            if not update_data:
+                return create_error_response("No fields provided for update", 400)
+
+            # 6. Apply updates
             for key, value in update_data.items():
                 setattr(patient, key, value)
             
             session.commit()
-            session.refresh(patient)
+            return {"message": f"Patient with ID {patient_id} updated successfully."}
+
     except HTTPException:
         raise
     except Exception as e:
         raise_internal_server_error(f"An unexpected error occurred while updating patient: {str(e)}")
-    
-    # Legacy SQL code removed - ORM only
-    
-    return {"message": f"Patient with ID {patient_id} updated successfully."}
+
 
 @router.delete("/{patient_id}")
-async def delete_patient(patient_id: int, current_user: dict = Depends(get_current_active_user)):
+async def delete_patient(patient_id: int, current_user: dict = Depends(require_patients_full)):
     tenant_id = get_tenant_id()
     
     if not check_patient_exists(patient_id, tenant_id):
@@ -680,7 +614,7 @@ async def delete_patient(patient_id: int, current_user: dict = Depends(get_curre
         raise_internal_server_error(f"Error deleting patient: {e}")
 
 @router.post("/{patient_id}/upload/photo")
-async def upload_patient_photo(patient_id: int, file: UploadFile = File(...), current_user: dict = Depends(get_current_active_user)):  # upload a patient photo. accepts: JPG, PNG, JPEG
+async def upload_patient_photo(patient_id: int, file: UploadFile = File(...), current_user: dict = Depends(require_patients_full)):  # upload a patient photo. accepts: JPG, PNG, JPEG
     tenant_id = get_tenant_id()
     allowed_types = ["image/jpeg", "image/jpg", "image/png"]
     if file.content_type not in allowed_types:
@@ -688,14 +622,16 @@ async def upload_patient_photo(patient_id: int, file: UploadFile = File(...), cu
     
     # Validate patient exists
     try:
-        if postgres_cursor:
-            postgres_cursor.execute("SELECT id FROM patients_table WHERE id = %s AND tenant_id = %s", (patient_id, tenant_id))
-            if not postgres_cursor.fetchone():
-                raise HTTPException(status_code=404, detail="Patient not found")
+        with get_db_session() as session:
+            patient = session.query(PatientModel).filter(
+                and_(PatientModel.id == patient_id, PatientModel.tenant_id == tenant_id)
+            ).first()
+            if not patient:
+                raise_not_found_error("Patient", patient_id)
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error checking patient. Please try again or contact support.")
+        raise_internal_server_error(f"Error checking patient: {e}")
     file_ext = Path(file.filename).suffix.lower() if file.filename else ".jpg"
     if file_ext not in [".jpg", ".jpeg", ".png"]:
         file_ext = ".jpg"
@@ -714,7 +650,7 @@ async def upload_patient_photo(patient_id: int, file: UploadFile = File(...), cu
         raise HTTPException(status_code=500, detail="Error uploading photo. Please try again or contact support.")
 
 @router.post("/{patient_id}/upload/document")
-async def upload_patient_document(patient_id: int, file: UploadFile = File(...), description: str = Form(None), current_user: dict = Depends(get_current_active_user)):  # upload a patient document (PDF, images, etc.) and save metadata to database
+async def upload_patient_document(patient_id: int, file: UploadFile = File(...), description: str = Form(None), current_user: dict = Depends(require_patients_full)):  # upload a patient document (PDF, images, etc.) and save metadata to database
     tenant_id = get_tenant_id()
     
     # Validate file type
@@ -778,7 +714,7 @@ async def list_patient_files(
     patient_id: int,
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=10),  # Max 10 per page as per requirements
-    current_user: dict = Depends(get_current_active_user)
+    current_user: dict = Depends(require_patients_view)
 ):  # list all files for a patient (photo, documents from DB, prescriptions)
     tenant_id = get_tenant_id()
     
@@ -842,11 +778,10 @@ async def list_patient_files(
         raise_internal_server_error("Error listing files. Please try again or contact support.")
 
 @router.get("/{patient_id}/download/{file_type}/{filename}")
-async def download_patient_file(patient_id: int, file_type: str, filename: str, current_user: dict = Depends(get_current_active_user)):
+async def download_patient_file(patient_id: int, file_type: PatientFileType, filename: str, current_user: dict = Depends(get_current_active_user)):
     tenant_id = get_tenant_id()
-    if file_type not in ["photo", "documents", "prescriptions"]:
-        raise HTTPException(status_code=400, detail="Invalid file type. Use: photo, documents, or prescriptions")
-    
+    if not check_patient_exists(patient_id, tenant_id):
+        raise_not_found_error("Patient", patient_id)
     try:
         patient_folder = get_patient_folder(patient_id, tenant_id)
         file_path = patient_folder / file_type / filename
@@ -863,30 +798,54 @@ async def download_patient_file(patient_id: int, file_type: str, filename: str, 
 @router.get("/{patient_id}/billing/summary")
 async def get_patient_billing_summary(patient_id: int, current_user: dict = Depends(get_current_active_user)):
     tenant_id = get_tenant_id()
+    
     if not check_patient_exists(patient_id, tenant_id):
         raise_not_found_error("Patient", patient_id)
-    total_billed_from_appointments = 0.0
-    appointments_with_charges = 0
-    if postgres_cursor:
-        try:
-            postgres_cursor.execute(
-                "SELECT total_charge FROM appointments WHERE patient_id = %s AND tenant_id = %s AND status = 'Completed'",
-                (patient_id, tenant_id)
-            )
-            for row in postgres_cursor.fetchall():
-                if row[0]:
-                    total_billed_from_appointments += float(row[0])
-                    appointments_with_charges += 1
-        except Exception as e:
-            pass
-    last_payment_date = None
-    invoice_count = 0
-    
-    return {
-        "patient_id": patient_id,
-        "billing_summary": {
-            "total_billed_from_appointments": total_billed_from_appointments, "last_payment_date": last_payment_date,
-            "invoice_count": invoice_count, "completed_appointments_with_charges": appointments_with_charges
-        },
-        "note": "Billing amounts removed from patient module. Will be handled in billing module. This shows appointment charges only."
-    }
+        
+    try:
+        with get_db_session() as session:
+            # 1. Calculate summary from Appointments (Completed ones with charges)
+            # This logic mimics the old SQL but uses SQLAlchemy ORM
+            # Note: We don't have a 'total_charge' column in AppointmentsModel according to current schema, 
+            # so we'll look at linked billing invoices instead for more accuracy if needed.
+            # However, to maintain compatibility with the user's logic:
+            
+            # Fetch summary from billing_invoices table (the correct source of truth for bills)
+            billing_data = session.query(
+                func.sum(BillingInvoiceModel.total_amount).label("total_billed"),
+                func.count(BillingInvoiceModel.id).label("invoice_count"),
+                func.max(BillingInvoiceModel.issue_date).label("last_payment_date")
+            ).filter(
+                and_(
+                    BillingInvoiceModel.patient_id == patient_id,
+                    BillingInvoiceModel.tenant_id == tenant_id
+                )
+            ).first()
+
+            # Also count completed appointments (as a diagnostic/summary metric)
+            app_count = session.query(func.count(AppointmentsModel.id)).filter(
+                and_(
+                    AppointmentsModel.patient_id == patient_id,
+                    AppointmentsModel.tenant_id == tenant_id,
+                    AppointmentsModel.status == 'Completed'
+                )
+            ).scalar()
+
+            total_billed = float(billing_data.total_billed) if billing_data.total_billed else 0.0
+            invoice_count = billing_data.invoice_count if billing_data.invoice_count else 0
+            last_payment_date = date_to_string(billing_data.last_payment_date) if billing_data.last_payment_date else None
+            
+            return {
+                "patient_id": patient_id,
+                "billing_summary": {
+                    "total_billed": total_billed,
+                    "last_payment_date": last_payment_date,
+                    "invoice_count": invoice_count,
+                    "completed_appointments": app_count or 0
+                },
+                "status": "No bills found for this patient" if invoice_count == 0 else "Active",
+                "note": "Billing summary retrieved from integrated billing module."
+            }
+
+    except Exception as e:
+        raise_internal_server_error(f"Error fetching billing summary: {str(e)}")

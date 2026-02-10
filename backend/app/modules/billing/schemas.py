@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional, List, Literal
 from datetime import date, datetime
 from decimal import Decimal
@@ -137,42 +137,23 @@ class BillingInvoiceCreate(BaseModel):
             raise ValueError("Adjustments cannot exceed 999999.99 in absolute value")
         return v.quantize(Decimal('0.01'))
     
-    @field_validator('total_amount')
-    @classmethod
-    def validate_total_amount(cls, v: Decimal, info) -> Decimal:
-        """Validate total_amount matches sum of line_totals"""
-        if hasattr(info, 'data') and info.data.get('items'):
-            items = info.data.get('items', [])
-            sum_line_totals = sum(Decimal(str(item.get('line_total', 0))) for item in items)
-            if abs(v - sum_line_totals) > Decimal('0.01'):
-                raise ValueError(f"Total amount ({v}) must equal sum of line totals ({sum_line_totals})")
-        return v
-    
-    @field_validator('tax_amount')
-    @classmethod
-    def validate_tax_amount(cls, v: Decimal, info) -> Decimal:
-        """Validate tax_amount matches (total_amount * GST%) / 100"""
-        if hasattr(info, 'data'):
-            total_amount = info.data.get('total_amount', Decimal('0'))
-            gst_percentage = info.data.get('gst_percentage', Decimal('0'))
-            expected_tax = (total_amount * gst_percentage / Decimal('100')).quantize(Decimal('0.01'))
-            if abs(v - expected_tax) > Decimal('0.01'):
-                raise ValueError(f"Tax amount ({v}) must equal (total_amount × GST%) / 100 = {expected_tax}")
-        return v
-    
-    @field_validator('amount_paid')
-    @classmethod
-    def validate_amount_paid(cls, v: Decimal, info) -> Decimal:
-        """Validate amount_paid <= (total_amount + tax_amount + adjustments - discount_amount)"""
-        if hasattr(info, 'data'):
-            total_amount = info.data.get('total_amount', Decimal('0'))
-            tax_amount = info.data.get('tax_amount', Decimal('0'))
-            adjustments = info.data.get('adjustments', Decimal('0'))
-            discount_amount = info.data.get('discount_amount', Decimal('0'))
-            max_payable = total_amount + tax_amount + adjustments - discount_amount
-            if v > max_payable:
-                raise ValueError(f"Amount paid ({v}) cannot exceed total payable ({max_payable})")
-        return v
+    @model_validator(mode='after')
+    def validate_invoice_totals(self) -> 'BillingInvoiceCreate':
+        """Validate all totals and taxes match"""
+        if self.items:
+            sum_line_totals = sum(item.line_total for item in self.items)
+            if abs(self.total_amount - sum_line_totals) > Decimal('0.01'):
+                raise ValueError(f"Total amount ({self.total_amount}) must equal sum of line totals ({sum_line_totals})")
+        
+        expected_tax = (self.total_amount * self.gst_percentage / Decimal('100')).quantize(Decimal('0.01'))
+        if abs(self.tax_amount - expected_tax) > Decimal('0.01'):
+            raise ValueError(f"Tax amount ({self.tax_amount}) must equal (total_amount × GST%) / 100 = {expected_tax}")
+        
+        max_payable = self.total_amount + self.tax_amount + self.adjustments - self.discount_amount
+        # Allow amount_paid to be less than max_payable for partial payments
+        if self.amount_paid > max_payable + Decimal('0.01'):
+            raise ValueError(f"Amount paid ({self.amount_paid}) cannot exceed total payable ({max_payable})")
+        return self
     
     @field_validator('coupon_code')
     @classmethod
@@ -405,42 +386,22 @@ class PharmacyWalkInBillCreate(BaseModel):
             raise ValueError("Adjustments cannot exceed 999999.99 in absolute value")
         return v.quantize(Decimal('0.01'))
     
-    @field_validator('total_amount')
-    @classmethod
-    def validate_total_amount(cls, v: Decimal, info) -> Decimal:
-        """Validate total_amount matches sum of line_totals"""
-        if hasattr(info, 'data') and info.data.get('items'):
-            items = info.data.get('items', [])
-            sum_line_totals = sum(Decimal(str(item.get('line_total', 0))) for item in items)
-            if abs(v - sum_line_totals) > Decimal('0.01'):
-                raise ValueError(f"Total amount ({v}) must equal sum of line totals ({sum_line_totals})")
-        return v
-    
-    @field_validator('tax_amount')
-    @classmethod
-    def validate_tax_amount(cls, v: Decimal, info) -> Decimal:
-        """Validate tax_amount matches (total_amount * GST%) / 100"""
-        if hasattr(info, 'data'):
-            total_amount = info.data.get('total_amount', Decimal('0'))
-            gst_percentage = info.data.get('gst_percentage', Decimal('0'))
-            expected_tax = (total_amount * gst_percentage / Decimal('100')).quantize(Decimal('0.01'))
-            if abs(v - expected_tax) > Decimal('0.01'):
-                raise ValueError(f"Tax amount ({v}) must equal (total_amount × GST%) / 100 = {expected_tax}")
-        return v
-    
-    @field_validator('amount_paid')
-    @classmethod
-    def validate_amount_paid(cls, v: Decimal, info) -> Decimal:
-        """Validate amount_paid <= (total_amount + tax_amount + adjustments - discount_amount)"""
-        if hasattr(info, 'data'):
-            total_amount = info.data.get('total_amount', Decimal('0'))
-            tax_amount = info.data.get('tax_amount', Decimal('0'))
-            adjustments = info.data.get('adjustments', Decimal('0'))
-            discount_amount = info.data.get('discount_amount', Decimal('0'))
-            max_payable = total_amount + tax_amount + adjustments - discount_amount
-            if v > max_payable:
-                raise ValueError(f"Amount paid ({v}) cannot exceed total payable ({max_payable})")
-        return v
+    @model_validator(mode='after')
+    def validate_bill_totals(self) -> 'PharmacyWalkInBillCreate':
+        """Validate all totals and taxes match"""
+        if self.items:
+            sum_line_totals = sum(item.line_total for item in self.items)
+            if abs(self.total_amount - sum_line_totals) > Decimal('0.01'):
+                raise ValueError(f"Total amount ({self.total_amount}) must equal sum of line totals ({sum_line_totals})")
+        
+        expected_tax = (self.total_amount * self.gst_percentage / Decimal('100')).quantize(Decimal('0.01'))
+        if abs(self.tax_amount - expected_tax) > Decimal('0.01'):
+            raise ValueError(f"Tax amount ({self.tax_amount}) must equal (total_amount × GST%) / 100 = {expected_tax}")
+        
+        max_payable = self.total_amount + self.tax_amount + self.adjustments - self.discount_amount
+        if self.amount_paid > max_payable + Decimal('0.01'):
+            raise ValueError(f"Amount paid ({self.amount_paid}) cannot exceed total payable ({max_payable})")
+        return self
     
     @field_validator('coupon_code')
     @classmethod

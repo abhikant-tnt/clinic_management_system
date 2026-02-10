@@ -1,6 +1,6 @@
 """SQLAlchemy models for Asset Management module"""
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
-from app.core.models import Base
+from app.core.db_session import Base
 
 class RoomModel(Base):
     __tablename__ = "procedure_rooms"

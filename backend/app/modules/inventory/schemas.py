@@ -1,5 +1,6 @@
 from pydantic import BaseModel, field_validator
 from typing import Optional, Literal
+from app.core.validators import validate_phone_number
 from datetime import date, datetime
 from decimal import Decimal
 import re
@@ -18,12 +19,6 @@ def validate_date_format(v: str) -> str:
         raise ValueError(f"Invalid date: {str(e)}")
     return v
 
-def validate_phone(v: str) -> str:
-    """Validate phone number: exactly 10 digits"""
-    v = v.strip() if v else ""
-    if not v or not v.isdigit() or len(v) != 10:
-        raise ValueError("Phone number must contain exactly 10 digits")
-    return v
 
 class InventoryItemCreate(BaseModel):
     """Schema for creating an inventory item (CREATE SKU form)"""
@@ -144,8 +139,10 @@ class InventoryItemCreate(BaseModel):
 
     @field_validator('supplier_phone')
     @classmethod
-    def validate_supplier_phone(cls, v: str) -> str:
-        return validate_phone(v)
+    def validate_supplier_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return validate_phone_number(v)
 
 class InventoryItemUpdate(BaseModel):
     """Schema for updating an inventory item"""

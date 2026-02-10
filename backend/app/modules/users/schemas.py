@@ -1,12 +1,7 @@
 from pydantic import BaseModel, field_validator
 from typing import Optional
+from app.core.validators import validate_phone_number
 
-def validate_phone(v: str) -> str:
-    """Validate phone number: exactly 10 digits, only digits allowed"""
-    v = v.strip() if v else ""
-    if not v or not v.isdigit() or len(v) != 10:
-        raise ValueError("Phone number must contain exactly 10 digits (numbers only)")
-    return v
 
 class UserCreate(BaseModel):
     """Schema for creating user"""
@@ -15,6 +10,8 @@ class UserCreate(BaseModel):
     lastname: str
     speciality: Optional[str] = None
     phone: str
+    username: Optional[str] = None
+    password: Optional[str] = None
     user_type: Optional[str] = None  # owner, doctor, receptionist, staff
 
     @field_validator('firstname', 'lastname')
@@ -39,14 +36,14 @@ class UserCreate(BaseModel):
     @field_validator('phone')
     @classmethod
     def validate_phone_field(cls, v: str) -> str:
-        return validate_phone(v)
+        return validate_phone_number(v)
     
     @field_validator('user_type')
     @classmethod
     def validate_user_type(cls, v: Optional[str]) -> Optional[str]:
         if v is not None:
             v = v.lower().strip()
-            allowed_types = ['owner', 'doctor', 'receptionist', 'staff']
+            allowed_types = ['owner', 'doctor', 'receptionist', 'staff', 'pharmacist']
             if v not in allowed_types:
                 raise ValueError(f"user_type must be one of: {', '.join(allowed_types)}")
         return v
@@ -84,7 +81,7 @@ class UserUpdate(BaseModel):
     def validate_phone_field(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        return validate_phone(v)
+        return validate_phone_number(v)
     
     @field_validator('user_type')
     @classmethod
@@ -106,3 +103,38 @@ class User(BaseModel):
     phone: str
     user_type: Optional[str] = None
     is_active: Optional[bool] = None
+
+
+class ProfileUpdate(BaseModel):
+    """Schema for users to update their own profile"""
+    firstname: Optional[str] = None
+    lastname: Optional[str] = None
+    speciality: Optional[str] = None
+    phone: Optional[str] = None
+
+    @field_validator('firstname', 'lastname')
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            if not v or not v.strip():
+                raise ValueError("Name cannot be empty")
+            v = v.strip()
+            if len(v) > 255:
+                raise ValueError("Name cannot exceed 255 characters")
+        return v
+    
+    @field_validator('speciality')
+    @classmethod
+    def validate_speciality(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            if len(v) > 255:
+                raise ValueError("Speciality cannot exceed 255 characters")
+        return v
+
+    @field_validator('phone')
+    @classmethod
+    def validate_phone_field(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return validate_phone_number(v)

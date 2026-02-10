@@ -5,8 +5,8 @@ import jwt
 from app.core.config import settings
 from app.core.database import get_postgres_connection, postgres_connected
 from app.core.db_utils import get_db_session
-from app.core.models import UserModel
-from app.core.permissions import USER_TYPE_PLATFORM_ADMIN, is_platform_admin
+from app.modules.users.models import UserModel
+from app.core.constants import is_platform_admin
 from sqlalchemy import and_
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_PREFIX}/auth/login")
@@ -27,14 +27,13 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         username: str = payload.get("sub")
         user_id: int = payload.get("user_id")
         tenant_id: str = payload.get("tenant_id")
         user_type: str = payload.get("user_type")
-        
+
         if username is None or user_id is None:
             raise credentials_exception
             
@@ -57,32 +56,48 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     # For regular users, use current_tenant_id
     lookup_tenant_id = tenant_id if is_platform_admin_user else current_tenant_id
     
-    if not user:
-        try:
-            with get_db_session() as session:
-                # Platform admin lookup: match user_id and username, allow any tenant
-                # Regular user lookup: match user_id, username, and tenant_id
-                if is_platform_admin_user:
-                    user = session.query(UserModel).filter(
-                        and_(
-                            UserModel.id == user_id,
-                            UserModel.username == username,
-                            UserModel.is_active == True
-                        )
-                    ).first()
-                else:
-                    user = session.query(UserModel).filter(
-                        and_(
-                            UserModel.id == user_id,
-                            UserModel.username == username,
-                            UserModel.tenant_id == lookup_tenant_id,
-                            UserModel.is_active == True
-                        )
-                    ).first()
-        except Exception as e:
-            print(f"Warning: Error looking up user in database: {e}")
+    user_data = None
+    try:
+        with get_db_session() as session:
+            # Platform admin lookup: match user_id and username, allow any tenant
+            # Regular user lookup: match user_id, username, and tenant_id
+            if is_platform_admin_user:
+                user = session.query(UserModel).filter(
+                    and_(
+                        UserModel.id == user_id,
+                        UserModel.username == username,
+                        UserModel.is_active == True
+                    )
+                ).first()
+            else:
+                user = session.query(UserModel).filter(
+                    and_(
+                        UserModel.id == user_id,
+                        UserModel.username == username,
+                        UserModel.tenant_id == lookup_tenant_id,
+                        UserModel.is_active == True
+                    )
+                ).first()
+            
+            if user:
+                # Get tenant_id from user object or use from token/current tenant
+                user_tenant_id = user.tenant_id or (tenant_id if is_platform_admin_user else current_tenant_id)
+                user_data = {
+                    "id": user.id,
+                    "username": user.username,
+                    "user_type": user.user_type,
+                    "firstname": user.firstname,
+                    "lastname": user.lastname,
+                    "speciality": user.speciality,
+                    "phone": user.phone,
+                    "is_active": user.is_active,
+                    "tenant_id": user_tenant_id,
+                    "is_platform_admin": is_platform_admin_user
+                }
+    except Exception as e:
+        print(f"Warning: Error looking up user in database: {e}")
     
-    if not user and postgres_connected:
+    if not user_data and postgres_connected:
         try:
             with get_postgres_connection() as (_, cursor):
                 if is_platform_admin_user:
@@ -103,34 +118,16 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
                 if record:
                     columns = ["id", "username", "user_type", "firstname", 
                               "lastname", "speciality", "phone", "is_active", "tenant_id"]
-                    user = dict(zip(columns, record))
+                    user_data = dict(zip(columns, record))
+                    # Ensure is_platform_admin is set
+                    user_data["is_platform_admin"] = is_platform_admin_user
         except Exception:
             pass
     
-    if not user:
+    if not user_data:
         raise credentials_exception
     
-    if hasattr(user, 'id'):
-        # Get tenant_id from user object or use from token/current tenant
-        user_tenant_id = getattr(user, 'tenant_id', None) or (tenant_id if is_platform_admin_user else current_tenant_id)
-        return {
-            "id": user.id,
-            "username": user.username,
-            "user_type": user.user_type,
-            "firstname": user.firstname,
-            "lastname": user.lastname,
-            "speciality": user.speciality,
-            "phone": user.phone,
-            "is_active": user.is_active,
-            "tenant_id": user_tenant_id,
-            "is_platform_admin": is_platform_admin_user
-        }
-    
-    # For dict-based user (from raw SQL)
-    user_tenant_id = user.get("tenant_id") or (tenant_id if is_platform_admin_user else current_tenant_id)
-    user["tenant_id"] = user_tenant_id
-    user["is_platform_admin"] = is_platform_admin_user
-    return user
+    return user_data
 
 
 async def get_current_active_user(current_user: dict = Depends(get_current_user)) -> dict:

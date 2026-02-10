@@ -1,11 +1,13 @@
 """Authentication routes for login"""
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from app.modules.auth.schemas import UserLogin, Token, UserResponse, UserRegister, UserUpdate, UserDelete
+from app.modules.auth.schemas import Token, UserLogin, UserRegister, UserResponse, ChangePasswordRequest, ChangeUsernameRequest, UserDelete
 from app.modules.auth.services import authenticate_user, create_access_token, create_user_with_credentials, update_user_account, delete_user_account
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user
 from app.core.permissions import USER_TYPE_PLATFORM_ADMIN, is_platform_admin
+from app.core.db_utils import get_db_session
+from app.modules.users.models import UserModel
 
 router = APIRouter()
 
@@ -61,7 +63,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         "token_type": "bearer",
         "user_type": user["user_type"],
         "user_id": user["id"],
-        "username": user["username"]
+        "username": user["username"],
+        "message": "Login successful"
     }
 
 
@@ -104,7 +107,8 @@ async def login_json(credentials: UserLogin):
         "token_type": "bearer",
         "user_type": user["user_type"],
         "user_id": user["id"],
-        "username": user["username"]
+        "username": user["username"],
+        "message": "Login successful"
     }
 
 
@@ -117,30 +121,53 @@ async def get_current_user_info(current_user: dict = Depends(get_current_active_
     return current_user
 
 
+
+
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register_user(
-    user_data: UserRegister,
-    current_user: dict = Depends(get_current_active_user)
+    user_data: UserRegister
 ):
     """
-    Register a new user (creates staff with login credentials).
-    Requires authentication - only logged-in users can create new users.
+    Register a new user. 
+    - If no owner exists, only 'owner' role is allowed.
+    - If an owner exists, 'owner' role is forbidden, and registration is public.
     """
     tenant_id = get_tenant_id()
     
-    if user_data.user_type not in ["doctor", "staff"]:
+    # Check database state for owners
+    try:
+        with get_db_session() as session:
+            existing_owner = session.query(UserModel).filter(
+                UserModel.tenant_id == tenant_id,
+                UserModel.user_type == "owner"
+            ).first()
+            
+            owner_exists = existing_owner is not None
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    # Role guard based on owner existence
+    if not owner_exists:
+        if user_data.user_type != "owner":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="First user must be an owner. Please register as 'owner'."
+            )
+    else:
+        # If owner exists, registration is closed. Staff must be added by Owner via /api/users/
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="user_type must be 'doctor' or 'staff'"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Registration is closed for this clinic. Please contact the clinic owner to create an account for you."
         )
-    
+
+    # Basic validation for phone
     if not user_data.phone.isdigit() or len(user_data.phone) != 10:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Phone number must be exactly 10 digits"
+            detail="Please enter correct 10 digit number."
         )
     
-    staff_id = create_user_with_credentials(
+    user_id = create_user_with_credentials(
         firstname=user_data.firstname,
         lastname=user_data.lastname,
         phone=user_data.phone,
@@ -148,78 +175,81 @@ async def register_user(
         password=user_data.password,
         user_type=user_data.user_type,
         tenant_id=tenant_id,
-        speciality=user_data.speciality
+        speciality=user_data.speciality or ("Owner" if user_data.user_type == "owner" else None)
     )
     
-    if not staff_id:
+    if not user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username or phone number already exists"
         )
     
+    success_message = "User created successfully"
+    if user_data.user_type == "owner":
+        success_message = "Owner registration successful, please login."
+    
     return {
-        "message": "User created successfully",
-        "staff_id": staff_id,
+        "message": success_message,
+        "user_id": user_id,
         "username": user_data.username,
         "user_type": user_data.user_type
     }
 
 
-@router.put("/me", status_code=status.HTTP_200_OK)
-async def update_current_user(
-    update_data: UserUpdate,
+@router.post("/change-password", status_code=status.HTTP_200_OK)
+async def change_password(
+    request_data: ChangePasswordRequest,
     current_user: dict = Depends(get_current_active_user)
 ):
     """
-    Update current user's account (password and/or username).
-    Requires authentication.
-    - To change password: provide current_password and new_password
-    - To change username: provide username (must be unique)
+    Change current user's password.
+    Requires current password confirmation.
     """
     tenant_id = get_tenant_id()
     user_id = current_user.get("id")
     
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User ID not found in token"
-        )
-    
-    # Validate that at least one field is being updated
-    if not update_data.new_password and not update_data.username:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one field (new_password or username) must be provided"
-        )
-    
-    # If changing password, current_password is required
-    if update_data.new_password and not update_data.current_password:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="current_password is required when changing password"
-        )
-    
     success = update_user_account(
         user_id=user_id,
         tenant_id=tenant_id,
-        current_password=update_data.current_password,
-        new_password=update_data.new_password,
-        username=update_data.username
+        current_password=request_data.current_password,
+        new_password=request_data.new_password
     )
     
     if not success:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to update account. Check current password or username availability."
+            detail="Wrong password.please enter correct password again"
         )
     
-    return {
-        "message": "Account updated successfully",
-        "updated_fields": {
-            "password": update_data.new_password is not None,
-            "username": update_data.username is not None
-        }
-    }
+    return {"message": "Password changed successfully"}
+
+
+@router.post("/change-username", status_code=status.HTTP_200_OK)
+async def change_username(
+    request_data: ChangeUsernameRequest,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """
+    Change current user's username.
+    Requires password confirmation for security.
+    """
+    tenant_id = get_tenant_id()
+    user_id = current_user.get("id")
+    
+    success = update_user_account(
+        user_id=user_id,
+        tenant_id=tenant_id,
+        current_password=request_data.current_password,
+        username=request_data.new_username
+    )
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Wrong password.please enter correct password again or check if username is already taken"
+        )
+    
+    return {"message": "Username updated successfully"}
 
 
 @router.delete("/me", status_code=status.HTTP_200_OK)
@@ -242,11 +272,11 @@ async def delete_current_user(
             detail="User ID not found in token"
         )
     
-    # Prevent deleting owner or platform admin
-    if user_type == "owner" or user_type == USER_TYPE_PLATFORM_ADMIN:
+    # Prevent deleting platform admin
+    if user_type == USER_TYPE_PLATFORM_ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot delete owner or platform admin account"
+            detail="Cannot delete platform admin account"
         )
     
     success = delete_user_account(

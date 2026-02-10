@@ -4,7 +4,7 @@ from typing import Optional, List, Dict, Any
 import time
 from app.core.database import get_postgres_connection, postgres_connected
 from app.core.db_utils import get_db_session
-from app.core.models import UserModel
+from app.modules.users.models import UserModel
 from app.admin.platform.schemas import (
     SystemHealthResponse,
     TenantMetadata,

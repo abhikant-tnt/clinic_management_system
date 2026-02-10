@@ -4,7 +4,9 @@ from datetime import date, timedelta, time
 from app.core.dependencies import get_current_active_user
 from app.core.config import settings
 from app.core.db_utils import get_db_session
-from app.core.models import AppointmentsModel, PatientModel, UserModel
+from app.modules.appointments.models import AppointmentsModel
+from app.modules.patients.models import PatientModel
+from app.modules.users.models import UserModel
 from app.core.date_helpers import string_to_date, date_to_string
 from sqlalchemy import and_, or_
 

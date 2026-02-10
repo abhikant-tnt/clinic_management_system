@@ -1,9 +1,9 @@
 """SQLAlchemy database session setup"""
 from urllib.parse import quote_plus
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from app.core.config import settings
-from app.core.models import Base
+Base = declarative_base() 
 
 # Create database engine using PostgreSQL connection
 # This uses the same connection settings as the raw PostgreSQL connection
